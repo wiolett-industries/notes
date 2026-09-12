@@ -14,8 +14,8 @@ type RequestJSON = Omit<PublicKeyCredentialRequestOptions, 'challenge' | 'allowC
 type PRFOutputs = AuthenticationExtensionsClientOutputs & { prf?: { enabled?: boolean; results?: { first: ArrayBuffer } } };
 type PRFInputs = AuthenticationExtensionsClientInputs & { prf: { eval?: { first: Uint8Array<ArrayBuffer> } } };
 export type PendingRegistration = { options: RequestJSON; accountId: string };
-export type Unlocked = { key: CryptoKey; accountId: string; revision: number; board: BoardData; entityIndex?: EntityIndex | null };
-const PRF_ERROR = 'Этот браузер или хранилище passkey не поддерживает шифрование (PRF). Выберите другой passkey-провайдер или браузер.';
+export type Unlocked = { key: CryptoKey; accountId: string; revision: number; board: BoardData; entityIndex?: EntityIndex | null; authMethod?: 'passkey' | 'key' };
+const PRF_ERROR = 'Этот браузер или passkey не поддерживает шифрование (PRF). Можно создать отдельную доску через «Войти по ключу».';
 function supported() {
   if (!window.isSecureContext || !window.PublicKeyCredential || !navigator.credentials || !crypto.subtle) throw new Error('Для passkey нужен поддерживаемый браузер и HTTPS (или localhost).');
 }
@@ -104,6 +104,6 @@ export async function prepareNoteLocks(accountId: string): Promise<LockKeys> {
 }
 export function authError(error: unknown): string {
   if (error instanceof DOMException && ['NotAllowedError', 'AbortError'].includes(error.name)) return 'Действие отменено или время ожидания истекло. Можно попробовать ещё раз.';
-  if (error instanceof DOMException && error.name === 'OperationError') return 'Не удалось расшифровать доску. Проверьте, что выбран её исходный passkey.';
+  if (error instanceof DOMException && error.name === 'OperationError') return 'Не удалось расшифровать данные. Используйте исходный ключ или passkey этой доски.';
   return error instanceof Error ? error.message : 'Не удалось открыть доску.';
 }

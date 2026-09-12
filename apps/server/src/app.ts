@@ -1,11 +1,11 @@
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { bodyLimit } from 'hono/body-limit';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse, type WebAuthnCredential, type RegistrationResponseJSON, type AuthenticationResponseJSON } from '@simplewebauthn/server';
-import { envelopeSchema, saveSchema, deltaSchema, initialEntitiesSchema, MAX_ENCRYPTED_BYTES } from '@quiet/shared';
+import { envelopeSchema, saveSchema, deltaSchema, initialEntitiesSchema, keyAuthSchema, keyRegistrationSchema, MAX_ENCRYPTED_BYTES } from '@quiet/shared';
 import { StorageLimitError, type Store, type Ceremony } from './store.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -109,6 +109,42 @@ export function createApp(store: Store, config: Config) {
     return result.authenticationInfo.newCounter;
   }
   app.get('/api/health', c => c.json({ ok: true }));
+  function verifyKey(accountId: string, authToken: string) {
+    const expected = store.keyAuthHash(accountId);
+    const matches = timingSafeEqual(Buffer.from(expected ?? '0'.repeat(64), 'hex'), Buffer.from(hash(authToken), 'hex'));
+    if (!expected || !matches) throw new HTTPException(401, { message: 'Неверный ключ или доска не найдена.' });
+  }
+  app.post('/api/auth/key/register', async c => {
+    const { accountId, authToken, snapshot } = keyRegistrationSchema.parse(await c.req.json());
+    if (store.keyAuthHash(accountId)) {
+      // An identical key can retry after a lost response, but never replace a board.
+      verifyKey(accountId, authToken);
+    } else {
+      try {
+        // The reserved prefix cannot be a WebAuthn credential ID (base64url).
+        store.createEntityAccount(accountId, { id: `key:${accountId}`, publicKey: new Uint8Array(), counter: 0 }, snapshot, hash(authToken));
+      } catch (error) {
+        if ((error as { code?: string; errcode?: number }).code === 'ERR_SQLITE_ERROR' && (error as { errcode?: number }).errcode === 1555) {
+          verifyKey(accountId, authToken);
+        } else throw error;
+      }
+    }
+    setSession(c, accountId);
+    return c.json(store.readVault(accountId));
+  });
+  app.post('/api/auth/key/login', async c => {
+    const { accountId, authToken } = keyAuthSchema.parse(await c.req.json());
+    verifyKey(accountId, authToken);
+    setSession(c, accountId);
+    return c.json(store.readVault(accountId));
+  });
+  app.post('/api/auth/key/unlock', async c => {
+    const saved = account(c);
+    const { accountId, authToken } = keyAuthSchema.parse(await c.req.json());
+    if (accountId !== saved.id) throw new HTTPException(403, { message: 'Ключ относится к другой доске.' });
+    verifyKey(accountId, authToken);
+    return c.json({ ok: true });
+  });
   app.post('/api/auth/register/options', async c => {
     const accountId = token();
     const options = await generateRegistrationOptions({ rpName: 'notes', rpID: config.rpID, userID: Buffer.from(accountId, 'base64url'), userName: `notes · ${accountId.slice(0, 8)}`, userDisplayName: 'notes', attestationType: 'none', authenticatorSelection: { residentKey: 'required', userVerification: 'required' }, supportedAlgorithmIDs: [-7, -257], extensions: { credProps: true } });

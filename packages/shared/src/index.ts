@@ -84,6 +84,8 @@ export const deltaSchema = z.object({
 export const initialEntitiesSchema = z.object({
   format: z.literal(2), manifest: manifestSchema, entities: z.array(entityWriteSchema).min(3).max(MAX_ENTITIES),
 }).strict().refine(value => new Set(value.entities.map(e => e.id)).size === value.entities.length);
+export const keyAuthSchema = z.object({ accountId: base64url.length(43), authToken: base64url.length(43) }).strict();
+export const keyRegistrationSchema = keyAuthSchema.extend({ snapshot: initialEntitiesSchema });
 export type BoardData = z.infer<typeof boardSchema>;
 export type NoteData = z.infer<typeof noteSchema>;
 export type ConnectionData = z.infer<typeof connectionSchema>;

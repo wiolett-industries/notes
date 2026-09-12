@@ -454,7 +454,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
         </div>
         {note.sealed ? <div className="sealed-cover">
           <div className="sealed-placeholder" aria-hidden="true"><i /><i /><i /><i /><i /></div>
-          <Button className="unseal-button" icon={noteBusy === note.id ? undefined : 'lock'} label="Разблокировать заметку с passkey" disabled={Boolean(noteBusy) || clipboardWorking} onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={() => void onToggleLock(note.id)}>{noteBusy === note.id && <span className="spinner" />}</Button>
+          <Button className="unseal-button" icon={noteBusy === note.id ? undefined : 'lock'} label="Разблокировать заметку" disabled={Boolean(noteBusy) || clipboardWorking} onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={() => void onToggleLock(note.id)}>{noteBusy === note.id && <span className="spinner" />}</Button>
         </div> : <>
         {note.kind === 'image' ? <div className="note-image"><img src={note.image} alt={note.title} draggable={false} /></div> : <NoteBody note={note} notes={noteCatalog} editing={editing?.id === note.id && editing.field === 'text'} busy={noteBusy === note.id} change={text => patch(note.id, { text })} edit={() => startEditing(note.id, 'text')} done={() => setEditing(null)} follow={focusNote} />}
         {note.kind === 'text' && <div className="note-footer"><span>{note.text.length ? `${note.text.length.toLocaleString('ru')} зн.` : ''}</span></div>}

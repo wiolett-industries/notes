@@ -31,6 +31,10 @@ export function openStore(path: string, imagesPath = process.env.IMAGES_PATH ?? 
     CREATE TABLE IF NOT EXISTS ceremonies (
       token_hash TEXT PRIMARY KEY, payload TEXT NOT NULL, expires INTEGER NOT NULL
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS key_credentials (
+      account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+      auth_hash TEXT NOT NULL
+    ) STRICT;
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
       expires INTEGER NOT NULL
@@ -105,18 +109,22 @@ export function openStore(path: string, imagesPath = process.env.IMAGES_PATH ?? 
     accountByCredential(id: string) {
       return db.prepare('SELECT * FROM accounts WHERE credential_id = ?').get(id) as Account | undefined;
     },
+    keyAuthHash(id: string) {
+      return (db.prepare('SELECT auth_hash FROM key_credentials WHERE account_id = ?').get(id) as { auth_hash: string } | undefined)?.auth_hash;
+    },
     accountBySession(hash: string, now: number) {
       return db.prepare('SELECT a.* FROM accounts a JOIN sessions s ON a.id = s.account_id WHERE s.token_hash = ? AND s.expires > ?').get(hash, now) as Account | undefined;
     },
     createAccount(id: string, credential: WebAuthnCredential, envelope: Envelope) {
       db.prepare('INSERT INTO accounts VALUES (?, ?, ?, ?, ?, 1, ?)').run(id, credential.id, credential.publicKey, credential.counter, JSON.stringify(credential.transports ?? []), JSON.stringify(envelope));
     },
-    createEntityAccount(id: string, credential: WebAuthnCredential, initial: InitialEntities) {
+    createEntityAccount(id: string, credential: WebAuthnCredential, initial: InitialEntities, keyAuthHash?: string) {
       beginWrite();
       try {
         db.prepare('INSERT INTO accounts VALUES (?, ?, ?, ?, ?, 1, ?)').run(id, credential.id, credential.publicKey, credential.counter, JSON.stringify(credential.transports ?? []), '');
         putEntities(id, 1, initial.entities);
         db.prepare('INSERT INTO entity_boards VALUES (?, ?)').run(id, JSON.stringify(initial.manifest));
+        if (keyAuthHash) db.prepare('INSERT INTO key_credentials VALUES (?, ?)').run(id, keyAuthHash);
         commitWrite();
       } catch (error) { rollbackWrite(); throw error; }
     },

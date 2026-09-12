@@ -10,6 +10,9 @@ import { BoardSync, type SyncState } from './sync';
 import { api } from './api';
 import { decryptBoard } from './crypto';
 import { sealNote } from './note-lock';
+import { KeyDialog } from './KeyDialog';
+import { openWithKey, unlockWithKey, prepareLocksWithKey } from './key-auth';
+import { rememberSession, restoreSession, forgetSession } from './session';
 import './style.css';
 
 const backupSchema = z.object({ format: z.literal('quiet-backup'), accountId: base64url.length(43), revision: z.number().int().positive(), envelope: envelopeSchema }).strict();
@@ -21,7 +24,9 @@ function App() {
   });
   const [unlocked, setUnlocked] = useState<Unlocked | null>(null);
   const [board, setBoard] = useState<BoardData>(emptyBoard);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(true);
+  const [keyDialog, setKeyDialog] = useState<'login' | 'unlock' | null>(null);
+  const pendingKey = useRef<{ submit: (value: string) => Promise<void>; cancel: () => void } | null>(null);
   const [noteBusy, setNoteBusy] = useState<string | null>(null);
   const noteOperation = useRef(false);
   const [error, setError] = useState('');
@@ -31,13 +36,23 @@ function App() {
   const [backupReady, setBackupReady] = useState(false);
   const sync = useRef<BoardSync | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  function open(value: Unlocked) {
+  async function open(value: Unlocked, remember = true) {
+    if (remember) { try { await rememberSession(value); } catch { /* Login still works when browser storage is disabled. */ } }
     try { localStorage.setItem(BOARD_MARKER, '1'); } catch { /* Storage may be disabled. */ }
     setHasBoard(true);
     sync.current?.dispose(); setUnlocked({ ...value, board: emptyBoard() }); setBoard(value.board); setError(''); setBackupReady(false);
     sync.current = new BoardSync(value, (state, message) => { setSyncState(state); setError(message ?? ''); });
     setSyncState('saved');
   }
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try { const value = await restoreSession(); if (active && value) await open(value, false); }
+      catch { try { await forgetSession(); } catch { /* Storage may be unavailable. */ } }
+      finally { if (active) setBusy(false); }
+    })();
+    return () => { active = false; };
+  }, []);
   useEffect(() => {
     function preventWheelZoom(e: WheelEvent) { if (e.ctrlKey || e.metaKey) e.preventDefault(); }
     function preventKeyZoom(e: KeyboardEvent) {
@@ -64,11 +79,20 @@ function App() {
   async function auth(create = false) {
     if (busy) return;
     setBusy(true); setError('');
-    try { open(create ? await finishRegistration(await beginRegistration()) : await login()); }
+    try { await open(create ? await finishRegistration(await beginRegistration()) : await login()); }
     catch (err) { setError(authError(err)); }
     finally { setBusy(false); }
   }
   function change(next: BoardData) { setBoard(next); setBackupReady(false); sync.current?.update(next); }
+  function askForKey<T>(operation: (value: string) => Promise<T>) {
+    return new Promise<T>((resolve, reject) => {
+      pendingKey.current = {
+        submit: async value => { const result = await operation(value); pendingKey.current = null; resolve(result); },
+        cancel: () => reject(new DOMException('Действие отменено.', 'AbortError')),
+      };
+      setKeyDialog('unlock');
+    });
+  }
   async function toggleNoteLock(id: string) {
     const manager = sync.current;
     if (!manager || !unlocked || noteOperation.current || busy) return;
@@ -80,12 +104,16 @@ function App() {
       if (!note) return;
       let keys = manager.board.lockKeys;
       if (!keys) {
-        keys = await prepareNoteLocks(unlocked.accountId);
+        keys = unlocked.authMethod === 'key'
+          ? await askForKey(value => prepareLocksWithKey(value, unlocked.accountId))
+          : await prepareNoteLocks(unlocked.accountId);
         if (sync.current !== manager) return;
         change({ ...manager.board, lockKeys: keys });
       }
       const wasSealed = Boolean(note.sealed);
-      const result = wasSealed ? await unlockNote(note, keys, unlocked.accountId) : await sealNote(note, keys, unlocked.accountId);
+      const result = wasSealed && unlocked.authMethod === 'key'
+        ? await askForKey(value => unlockWithKey(value, unlocked.accountId, note, keys!))
+        : wasSealed ? await unlockNote(note, keys, unlocked.accountId) : await sealNote(note, keys, unlocked.accountId);
       if (sync.current !== manager) return;
       // A second note may have changed while the passkey dialog was open.
       const latest = manager.board.notes.find(n => n.id === id);
@@ -106,6 +134,7 @@ function App() {
     if (!discard && !(await sync.current.flush())) { setLockDialog(true); setBusy(false); return; }
     // Erase local keys/UI immediately even if logout cannot reach the server.
     sync.current.dispose(); sync.current = null; setUnlocked(null); setBoard(emptyBoard()); setLockDialog(false); setError(''); setBackupReady(false);
+    try { await forgetSession(); } catch { /* Access marker is removed before IndexedDB cleanup. */ }
     try { await api('/logout'); } catch { /* HttpOnly session cannot decrypt a board. It expires server-side. */ }
     finally { setBusy(false); }
   }
@@ -139,15 +168,24 @@ function App() {
   }
   return <main>
     {unlocked ? <Board key={unlocked.accountId} board={board} onChange={change} noteBusy={noteBusy} onToggleLock={toggleNoteLock}
-      clipboardKey={unlocked.key} accountId={unlocked.accountId} interactionBlocked={lockDialog || reloadDialog}
+      clipboardKey={unlocked.key} accountId={unlocked.accountId} interactionBlocked={lockDialog || reloadDialog || Boolean(keyDialog)}
       actions={<><Button icon="download" label="Скачать зашифрованную копию" disabled={Boolean(noteBusy)} onClick={download} /><Button icon="upload" label="Открыть зашифрованную копию" disabled={Boolean(noteBusy)} onClick={() => fileInput.current?.click()} /><Button icon="lock" label="Выйти" disabled={busy || Boolean(noteBusy)} onClick={() => void lock()} /></>}
     /> : <div className="login-screen">
       <Button className="primary login-button" onClick={() => void auth()} disabled={busy} aria-busy={busy}>
         {busy ? <span className="spinner" aria-label="Загрузка доски" role="status" /> : 'Войти с passkey'}
       </Button>
-      {!hasBoard && <Button className="create-key-link" onClick={() => void auth(true)} disabled={busy}>Создать новый ключ</Button>}
+      <div className="login-links">
+        {!hasBoard && <Button className="create-key-link" onClick={() => void auth(true)} disabled={busy}>Создать passkey</Button>}
+        <Button className="create-key-link" onClick={() => { setError(''); setKeyDialog('login'); }} disabled={busy}>Войти по ключу</Button>
+      </div>
       {error && <p className={`login-error ${!hasBoard ? 'with-create-link' : ''}`} role="alert">{error}</p>}
     </div>}
+    {keyDialog && <KeyDialog unlock={keyDialog === 'unlock'} submit={async (value, create) => {
+      if (keyDialog === 'unlock') await pendingKey.current?.submit(value);
+      else await open(await openWithKey(value, create));
+    }} close={() => {
+      pendingKey.current?.cancel(); pendingKey.current = null; setKeyDialog(null);
+    }} />}
     <input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={e => void importBackup(e.currentTarget.files?.[0])} />
     {unlocked && error && <div className="error-banner" role="alert"><div><strong>{syncState === 'conflict' ? 'Конфликт версий' : 'Не удалось сохранить'}</strong><p>{error}</p></div><div className="error-actions">{syncState !== 'conflict' && <Button icon="retry" onClick={() => void sync.current?.flush()}>Повторить</Button>}<Button icon="download" onClick={download}>Скачать копию</Button>{syncState === 'conflict' && <Button onClick={() => setReloadDialog(true)}>Загрузить с сервера</Button>}</div></div>}
     {(lockDialog || reloadDialog) && <div className="modal-backdrop"><section className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><Icon name="lock" size={28} /><h2 id="dialog-title">Сначала сохрани свою версию.</h2><p>{lockDialog ? 'На сервер ушли не все изменения. Скачай зашифрованную копию или вернись к доске.' : 'Загрузка с сервера заменит локальные изменения. Сначала можно скачать зашифрованную копию.'}</p><p className="muted">Копия открывается только с тем же passkey.</p><Button className="primary" icon="download" onClick={download}>{backupReady ? 'Скачать копию ещё раз' : 'Скачать копию'}</Button><Button className="secondary" disabled={busy} onClick={() => lockDialog ? void lock(true) : void reload()}>{lockDialog ? 'Заблокировать и убрать локальные изменения' : 'Заменить локальную версию'}</Button><Button className="text-button" onClick={() => { setLockDialog(false); setReloadDialog(false); }}>Вернуться к доске</Button></section></div>}
