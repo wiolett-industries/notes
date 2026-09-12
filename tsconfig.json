@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "target": "ES2023", "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext", "moduleResolution": "Bundler", "strict": true,
+    "jsx": "react-jsx", "jsxImportSource": "preact", "noEmit": true,
+    "esModuleInterop": true, "skipLibCheck": true, "resolveJsonModule": true,
+    "types": ["node", "vite/client"]
+  },
+  "include": ["apps", "packages", "tests", "playwright.config.ts"]
+}

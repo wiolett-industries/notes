@@ -1,0 +1,81 @@
+:root {
+  color-scheme: light dark;
+  --canvas: #f5f4f0;
+  --canvas-glass: #f5f4f0ed;
+  --dot: #cdcec6;
+  --micro-dot: #e2e2da;
+  --surface: #fcfcf9;
+  --text: #292e2a;
+  --muted: #73786f;
+  --muted-heading: #92988a;
+  --line: #dedfd6;
+  --hover: #e9eae3;
+  --primary: #354638;
+  --primary-hover: #435647;
+  --on-primary: #f2f4eb;
+  --accent: #7c946d;
+  --focus: #6f8e61;
+  --good: #56724d;
+  --danger: #a44639;
+  --error-surface: #f7e9e3;
+  --error-line: #ddbaa7;
+  --selection: #bcd3ae80;
+  --mark: #e9ecdf;
+  --mark-border: #dce1d0;
+  --mark-ink: #56634c;
+  --tools: #2e3330;
+  --tool-ink: #f4f5ee;
+  --tool-muted: #aeb5ac;
+  --tool-hover: #454d45;
+  --tool-border: #4b524a;
+  --add: #dce6bd;
+  --add-hover: #e7efce;
+  --add-ink: #34402b;
+  --backdrop: #efeee6a8;
+}
+.pigment-sand { --paper: #f1e8c8; --paper-ink: #514831; --paper-line: #ded4ad; --paper-outline: #b7a467; }
+.pigment-sage { --paper: #dce5d5; --paper-ink: #3e513a; --paper-line: #c6d4ba; --paper-outline: #8eaa7a; }
+.pigment-rose { --paper: #eedbd5; --paper-ink: #64473e; --paper-line: #e0c4b9; --paper-outline: #bf9284; }
+.pigment-lavender { --paper: #e5dff0; --paper-ink: #544665; --paper-line: #d0c5e1; --paper-outline: #a392ba; }
+.pigment-sky { --paper: #dce6ec; --paper-ink: #3e5663; --paper-line: #c1d3dd; --paper-outline: #82a5b9; }
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #1b1d20;
+    --canvas-glass: #1b1d20ed;
+    --dot: #3a3d40;
+    --micro-dot: #2b2e31;
+    --surface: #25282b;
+    --text: #e4e7de;
+    --muted: #a0a69c;
+    --muted-heading: #919b89;
+    --line: #3b403b;
+    --hover: #363c36;
+    --primary: #cfddba;
+    --primary-hover: #e0eccd;
+    --on-primary: #273223;
+    --accent: #b4ca9b;
+    --focus: #b3cb99;
+    --good: #adca97;
+    --danger: #edb2a0;
+    --error-surface: #3b2c29;
+    --error-line: #775a4f;
+    --selection: #a5c78955;
+    --mark: #30392d;
+    --mark-border: #43513a;
+    --mark-ink: #c1d1ad;
+    --tools: #2d3330;
+    --tool-ink: #eff2e9;
+    --tool-muted: #aab4a7;
+    --tool-hover: #444f43;
+    --tool-border: #4b5749;
+    --add: #cadcad;
+    --add-hover: #daebbf;
+    --add-ink: #2a3623;
+    --backdrop: #111614c7;
+  }
+  .pigment-sand { --paper: #454131; --paper-ink: #e9dfba; --paper-line: #59523a; --paper-outline: #9d9062; }
+  .pigment-sage { --paper: #354236; --paper-ink: #d5e4ce; --paper-line: #455644; --paper-outline: #83a477; }
+  .pigment-rose { --paper: #4a3937; --paper-ink: #efd4c9; --paper-line: #614741; --paper-outline: #b58678; }
+  .pigment-lavender { --paper: #403a4d; --paper-ink: #e0d4f0; --paper-line: #574a68; --paper-outline: #a58cbe; }
+  .pigment-sky { --paper: #34414a; --paper-ink: #d1e3ee; --paper-line: #455868; --paper-outline: #7ca6bf; }
+}

@@ -1,0 +1,11 @@
+.git
+.workflow
+.env
+.env.*
+**/node_modules
+**/dist
+data
+**/*.sqlite*
+playwright-report
+test-results
+.DS_Store
