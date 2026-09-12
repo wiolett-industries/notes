@@ -12,7 +12,7 @@ import { decryptBoard } from './crypto';
 import { sealNote } from './note-lock';
 import { KeyDialog } from './KeyDialog';
 import { openWithKey, unlockWithKey, prepareLocksWithKey } from './key-auth';
-import { rememberSession, restoreSession, forgetSession } from './session';
+import { rememberSession, restoreSession, forgetSession, refreshSessionOnActivity } from './session';
 import './style.css';
 
 const backupSchema = z.object({ format: z.literal('quiet-backup'), accountId: base64url.length(43), revision: z.number().int().positive(), envelope: envelopeSchema }).strict();
@@ -36,6 +36,10 @@ function App() {
   const [backupReady, setBackupReady] = useState(false);
   const sync = useRef<BoardSync | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!unlocked) return;
+    return refreshSessionOnActivity(unlocked.accountId, message => { setSyncState('error'); setError(message); });
+  }, [unlocked?.accountId]);
   async function open(value: Unlocked, remember = true) {
     if (remember) { try { await rememberSession(value); } catch { /* Login still works when browser storage is disabled. */ } }
     try { localStorage.setItem(BOARD_MARKER, '1'); } catch { /* Storage may be disabled. */ }

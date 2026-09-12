@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 export const MAX_ENCRYPTED_BYTES = 32_000_000;
+export const SESSION_SECONDS = 12 * 60 * 60;
 export const MAX_BOARD_BYTES = 23_000_000;
 export const GRID_SIZE = 8;
 export const PRF_INPUT = 'quiet/board/passkey-prf/v1';

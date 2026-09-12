@@ -5,12 +5,11 @@ import { bodyLimit } from 'hono/body-limit';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse, type WebAuthnCredential, type RegistrationResponseJSON, type AuthenticationResponseJSON } from '@simplewebauthn/server';
-import { envelopeSchema, saveSchema, deltaSchema, initialEntitiesSchema, keyAuthSchema, keyRegistrationSchema, MAX_ENCRYPTED_BYTES } from '@quiet/shared';
+import { envelopeSchema, saveSchema, deltaSchema, initialEntitiesSchema, keyAuthSchema, keyRegistrationSchema, MAX_ENCRYPTED_BYTES, SESSION_SECONDS, base64url } from '@quiet/shared';
 import { StorageLimitError, type Store, type Ceremony } from './store.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const token = () => randomBytes(32).toString('base64url');
-const SESSION_SECONDS = 12 * 60 * 60;
 const CEREMONY_SECONDS = 5 * 60;
 const credentialId = z.string().regex(/^[A-Za-z0-9_-]+$/).min(1).max(2048);
 const encoded = z.string().regex(/^[A-Za-z0-9_-]+$/).min(1).max(100_000);
@@ -109,6 +108,16 @@ export function createApp(store: Store, config: Config) {
     return result.authenticationInfo.newCounter;
   }
   app.get('/api/health', c => c.json({ ok: true }));
+  app.post('/api/session/refresh', async c => {
+    const { accountId } = z.object({ accountId: base64url.length(43) }).strict().parse(await c.req.json());
+    const value = getCookie(c, sessionName);
+    const time = now();
+    if (!value || !store.extendSession(hash(value), accountId, time, time + SESSION_SECONDS * 1000)) {
+      throw new HTTPException(401, { message: 'Сессия истекла или в другой вкладке открыта другая доска. Сохраните локальную копию и войдите снова.' });
+    }
+    setCookie(c, sessionName, value, { ...cookie, maxAge: SESSION_SECONDS });
+    return c.json({ accountId, expiresIn: SESSION_SECONDS });
+  });
   function verifyKey(accountId: string, authToken: string) {
     const expected = store.keyAuthHash(accountId);
     const matches = timingSafeEqual(Buffer.from(expected ?? '0'.repeat(64), 'hex'), Buffer.from(hash(authToken), 'hex'));

@@ -174,6 +174,9 @@ export function openStore(path: string, imagesPath = process.env.IMAGES_PATH ?? 
     putSession(hash: string, id: string, expires: number) {
       db.prepare('INSERT INTO sessions VALUES (?, ?, ?)').run(hash, id, expires);
     },
+    extendSession(hash: string, id: string, now: number, expires: number) {
+      return db.prepare('UPDATE sessions SET expires = MAX(expires, ?) WHERE token_hash = ? AND account_id = ? AND expires > ?').run(expires, hash, id, now).changes === 1;
+    },
     deleteSession(hash: string) { db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hash); },
     close() { db.close(); },
   };
