@@ -101,11 +101,11 @@ export function attachCollaboration(server: HTTPServer | HTTPSServer, store: Sto
     }
   }
   function peers(boardId: string) {
-    const result: { id: string; uid: string; role: BoardRole; selection: Envelope | null }[] = [];
+    const result: { id: string; uid: string; role: BoardRole; color: number; selection: Envelope | null }[] = [];
     for (const client of clients) {
       if (client.ws.readyState !== WebSocket.OPEN || client.boardId !== boardId) continue;
       const role = watchRole(client);
-      if (role) result.push({ id: client.id, uid: client.uid!, role, selection: client.selection });
+      if (role) result.push({ id: client.id, uid: client.uid!, role, color: collaboration.color(client.uid!, boardId), selection: client.selection });
     }
     return result;
   }
@@ -212,14 +212,14 @@ export function attachCollaboration(server: HTTPServer | HTTPSServer, store: Sto
         const role = watchRole(client);
         if (!role || !client.boardId) throw new CollaborationError(403, 'Сначала подпишитесь на доступную доску.');
         client.selection = value.envelope;
-        broadcast(client.boardId, 'selection', { boardId: client.boardId, id: client.id, uid, role, envelope: value.envelope });
+        broadcast(client.boardId, 'selection', { boardId: client.boardId, id: client.id, uid, role, color: collaboration.color(uid, client.boardId), envelope: value.envelope });
         return { ok: true };
       }
       case 'cursor': {
         const value = z.object({ envelope: envelopeSchema.extend({ ciphertext: base64url.min(22).max(4096) }).nullable() }).strict().parse(params);
         const role = watchRole(client);
         if (!role || !client.boardId) throw new CollaborationError(403, 'Сначала подпишитесь на доступную доску.');
-        broadcast(client.boardId, 'cursor', { boardId: client.boardId, id: client.id, uid, role, envelope: value.envelope });
+        broadcast(client.boardId, 'cursor', { boardId: client.boardId, id: client.id, uid, role, color: collaboration.color(uid, client.boardId), envelope: value.envelope });
         return { ok: true };
       }
       default: throw new CollaborationError(404, 'Неизвестный метод.');

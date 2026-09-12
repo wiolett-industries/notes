@@ -15,7 +15,7 @@ import { participantColor as peerColor } from './participant-color';
 
 const labels: Record<NoteColor, string> = { sand: 'Песочный', sage: 'Шалфей', rose: 'Розовый', lavender: 'Лавандовый', sky: 'Голубой' };
 type DragPosition = { id: string; x: number; y: number; width: number; height: number };
-type Props = { board: BoardData; onChange: (board: BoardData) => void; locked?: boolean; noteBusy?: string | null; onToggleLock: (id: string) => Promise<void>; actions?: ComponentChildren; clipboardKey: CryptoKey; accountId: string; interactionBlocked?: boolean; role?: 'owner' | 'editor' | 'viewer'; peers?: { id: string; uid: string; role: string; x: number; y: number; selection?: string[] }[]; onCursor?: (point: Point | null) => void; onSelection?: (ids: string[]) => void; onDrag?: (positions: DragPosition[] | null) => void; dragPreviews?: Record<string, Omit<DragPosition, 'id'>> };
+type Props = { board: BoardData; onChange: (board: BoardData) => void; locked?: boolean; noteBusy?: string | null; onToggleLock: (id: string) => Promise<void>; actions?: ComponentChildren; clipboardKey: CryptoKey; accountId: string; interactionBlocked?: boolean; role?: 'owner' | 'editor' | 'viewer'; peers?: { id: string; uid: string; role: string; color?: number; x: number; y: number; selection?: string[] }[]; onCursor?: (point: Point | null) => void; onSelection?: (ids: string[]) => void; onDrag?: (positions: DragPosition[] | null) => void; dragPreviews?: Record<string, Omit<DragPosition, 'id'>> };
 type Gesture = { kind: 'pan' | 'note' | 'resize' | 'connect' | 'selection' | 'group'; pointer: number; start: Point; camera: BoardData['camera']; note?: NoteData; edge?: string; moved?: NoteData[]; bounds?: ReturnType<typeof groupBounds>; selection?: string[]; group?: string };
 type Draft = { source: string; point: Point; target?: string };
 export function Board({ board: incoming, onChange, locked = false, noteBusy = null, onToggleLock, actions, clipboardKey, accountId, interactionBlocked = false, role = 'owner', peers = [], onCursor, onSelection, onDrag, dragPreviews }: Props) {
@@ -162,7 +162,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     }
     return new Map([...byNote].map(([id, users]) => {
       const uids = [...users].sort();
-      return [id, { uids, color: peerColor(uids[0]), label: `${uids[0].slice(0, 8)}${uids.length > 1 ? ` +${uids.length - 1}` : ''}` }];
+      return [id, { uids, color: peerColor(uids[0], peers.find(peer => peer.uid === uids[0])?.color), label: `${uids[0].slice(0, 8)}${uids.length > 1 ? ` +${uids.length - 1}` : ''}` }];
     }));
   }, [peers]);
   function openSearch() {
@@ -627,7 +627,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
       })}
     </div>
     {peers.length > 0 && <div className="board-peer-cursors" aria-hidden="true">
-      {peers.filter(peer => Number.isFinite(peer.x) && Number.isFinite(peer.y)).map(peer => <div key={peer.id} className="board-peer-cursor" style={{ transform: `translate(${peer.x * cam.zoom + cam.x}px, ${peer.y * cam.zoom + cam.y}px)`, '--peer-color': peerColor(peer.uid) }}>
+      {peers.filter(peer => Number.isFinite(peer.x) && Number.isFinite(peer.y)).map(peer => <div key={peer.id} className="board-peer-cursor" style={{ transform: `translate(${peer.x * cam.zoom + cam.x}px, ${peer.y * cam.zoom + cam.y}px)`, '--peer-color': peerColor(peer.uid, peer.color) }}>
         <Icon name="cursor" size={20} /><span>{peer.uid.length > 10 ? `${peer.uid.slice(0, 8)}…` : peer.uid} · {peer.role}</span>
       </div>)}
     </div>}

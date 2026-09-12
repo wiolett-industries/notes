@@ -61,6 +61,16 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
   // Serialize schema upgrade/backfill with other processes opening this database.
   db.exec('BEGIN IMMEDIATE');
   try {
+    const memberColumns = db.prepare('PRAGMA table_info(collaboration_members)').all() as { name: string }[];
+    if (!memberColumns.some(column => column.name === 'color')) {
+      db.exec('ALTER TABLE collaboration_members ADD COLUMN color INTEGER NOT NULL DEFAULT 0');
+      const members = db.prepare("SELECT board_id, uid FROM collaboration_members ORDER BY board_id, role != 'owner', uid").all() as { board_id: string; uid: string }[];
+      let previous = '', slot = 0;
+      for (const member of members) {
+        if (member.board_id !== previous) { previous = member.board_id; slot = 0; }
+        db.prepare('UPDATE collaboration_members SET color = ? WHERE board_id = ? AND uid = ?').run(slot++ % 10, member.board_id, member.uid);
+      }
+    }
     const columns = db.prepare('PRAGMA table_info(collaboration_identities)').all() as { name: string }[];
     if (!columns.some(column => column.name === 'initialized')) {
       db.exec('ALTER TABLE collaboration_identities ADD COLUMN initialized INTEGER NOT NULL DEFAULT 0');
@@ -240,7 +250,7 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
         if (!identity(uid)) fail(409, 'Сначала создайте ключи пользователя.');
         checkPolicy(value.id, 'owner', [], value.snapshot.entities, []);
         db.prepare('INSERT INTO collaboration_boards VALUES (?, ?, ?, 1, ?, NULL, NULL)').run(value.id, uid, JSON.stringify(value.name), JSON.stringify(value.snapshot.manifest));
-        db.prepare('INSERT INTO collaboration_members VALUES (?, ?, ?, ?)').run(value.id, uid, 'owner', value.wrappedKey);
+        db.prepare('INSERT INTO collaboration_members (board_id, uid, role, wrapped_key, color) VALUES (?, ?, ?, ?, 0)').run(value.id, uid, 'owner', value.wrappedKey);
         writeEntities(value.id, 1, [], value.snapshot.entities, [], created, retired);
         db.prepare('UPDATE collaboration_identities SET initialized = 1 WHERE uid = ?').run(uid);
         return entry(uid, value.id);
@@ -312,16 +322,23 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
         owner(uid, boardId);
         if (target === uid) fail(400, 'Нельзя пригласить себя.');
         if (!identity(target)) fail(404, 'Пользователь ещё не создал ключи.');
-        db.prepare(`INSERT INTO collaboration_members VALUES (?, ?, ?, ?) ON CONFLICT(board_id, uid)
-          DO UPDATE SET role=excluded.role, wrapped_key=excluded.wrapped_key`).run(boardId, target, memberRole, wrappedKey);
+        const existing = db.prepare('SELECT uid, color FROM collaboration_members WHERE board_id = ?').all(boardId) as { uid: string; color: number }[];
+        const member = existing.find(item => item.uid === target);
+        if (!member && existing.length >= 10) fail(409, 'На доске может быть не больше 10 участников, включая владельца.');
+        const color = member?.color ?? Array.from({ length: 10 }, (_, index) => index).find(index => !existing.some(item => item.color === index))!;
+        db.prepare(`INSERT INTO collaboration_members (board_id, uid, role, wrapped_key, color) VALUES (?, ?, ?, ?, ?) ON CONFLICT(board_id, uid)
+          DO UPDATE SET role=excluded.role, wrapped_key=excluded.wrapped_key`).run(boardId, target, memberRole, wrappedKey, color);
         return memberIds(boardId);
       });
       notify({ event: 'boards.changed', boardId, uids: [target] });
       notify({ event: 'board.access', boardId, uids });
       return { ok: true };
     },
-    members(uid: string, boardId: string): { uid: string; role: BoardRole }[] {
-      return transaction(() => { owner(uid, boardId); return db.prepare('SELECT uid, role FROM collaboration_members WHERE board_id = ? ORDER BY uid').all(boardId) as { uid: string; role: BoardRole }[]; });
+    color(uid: string, boardId: string): number {
+      return (db.prepare('SELECT color FROM collaboration_members WHERE board_id = ? AND uid = ?').get(boardId, uid) as { color: number } | undefined)?.color ?? 0;
+    },
+    members(uid: string, boardId: string): { uid: string; role: BoardRole; color: number }[] {
+      return transaction(() => { owner(uid, boardId); return db.prepare('SELECT uid, role, color FROM collaboration_members WHERE board_id = ? ORDER BY color').all(boardId) as { uid: string; role: BoardRole; color: number }[]; });
     },
     removeMember(uid: string, boardId: string, target: string) {
       identifier.parse(target);

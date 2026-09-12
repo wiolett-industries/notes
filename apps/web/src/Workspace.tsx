@@ -16,7 +16,7 @@ import { RoleDropdown } from './RoleDropdown';
 import { participantColor } from './participant-color';
 
 type NamedBoard = BoardEntry & { title: string; key: CryptoKey };
-type Peer = { id: string; uid: string; role: string; x: number; y: number; selection?: string[] };
+type Peer = { id: string; uid: string; role: string; color?: number; x: number; y: number; selection?: string[] };
 type DragPosition = { id: string; x: number; y: number; width: number; height: number };
 export function Workspace({ account, initialBoard, migrated, logout }: { account: Unlocked; initialBoard: BoardData; migrated: () => Promise<void>; logout: () => Promise<void> }) {
   const [entries, setEntries] = useState<NamedBoard[]>([]);
@@ -32,7 +32,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
   const [name, setName] = useState('');
   const [inviteUid, setInviteUid] = useState('');
   const [inviteRole, setInviteRole] = useState<'editor' | 'viewer'>('viewer');
-  const [members, setMembers] = useState<{ uid: string; role: string }[]>([]);
+  const [members, setMembers] = useState<{ uid: string; role: string; color: number }[]>([]);
   const [peers, setPeers] = useState<Peer[]>([]);
   const [people, setPeople] = useState(1);
   const [dragPreviews, setDragPreviews] = useState<Record<string, DragPosition>>({});
@@ -142,7 +142,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
           if (current.current?.id !== active.id || !Number.isFinite(point.sequence) || point.sequence <= (lastPackets.current.get(`cursor:${data.id}`) ?? -1)) return;
           lastPackets.current.set(`cursor:${data.id}`, point.sequence);
           if (!point.hidden && (!Number.isFinite(point.x) || !Number.isFinite(point.y))) return;
-          setPeers(old => [...old.filter(peer => peer.id !== data.id), { ...old.find(peer => peer.id === data.id), id: data.id, uid: data.uid, role: data.role, x: point.hidden ? NaN : point.x, y: point.hidden ? NaN : point.y }]);
+          setPeers(old => [...old.filter(peer => peer.id !== data.id), { ...old.find(peer => peer.id === data.id), id: data.id, uid: data.uid, role: data.role, color: data.color, x: point.hidden ? NaN : point.x, y: point.hidden ? NaN : point.y }]);
         } catch { /* Ignore an invalid ephemeral cursor packet. */ }
       }),
     ];
@@ -280,13 +280,13 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
       remoteDrags.current.set(data.id, { positions, at: Date.now() }); renderDrags();
     } catch { /* Ignore malformed transient geometry. */ }
   }
-  async function receiveSelection(data: { boardId: string; id: string; uid: string; role: string; envelope: any }) {
+  async function receiveSelection(data: { boardId: string; id: string; uid: string; role: string; color?: number; envelope: any }) {
     const active = current.current;
     if (!active || active.id !== data.boardId || data.uid === account.accountId) return;
     try {
       const ids = data.envelope ? await decryptValue<unknown>(active.key, active.id, 'selection', data.envelope) : [];
       if (!Array.isArray(ids) || ids.length > 10_000 || ids.some(id => typeof id !== 'string') || current.current?.id !== active.id) return;
-      setPeers(old => [...old.filter(peer => peer.id !== data.id), { x: NaN, y: NaN, ...old.find(peer => peer.id === data.id), id: data.id, uid: data.uid, role: data.role, selection: ids }]);
+      setPeers(old => [...old.filter(peer => peer.id !== data.id), { x: NaN, y: NaN, ...old.find(peer => peer.id === data.id), id: data.id, uid: data.uid, role: data.role, color: data.color, selection: ids }]);
     } catch { /* Ignore invalid presence metadata. */ }
   }
   function selection(ids: string[]) {
@@ -332,10 +332,10 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
       <label>Название<input className="access-key-input" value={name} maxLength={120} onInput={e => setName(e.currentTarget.value)} /></label>
       <label>UID участника<input className="access-key-input" value={inviteUid} onInput={e => setInviteUid(e.currentTarget.value)} autoComplete="off" /></label>
       <RoleDropdown value={inviteRole} change={setInviteRole} disabled={busy} />
-      <Button disabled={busy || !inviteUid.trim()} onClick={() => void action(invite)}>Добавить участника</Button>
-      <div className="member-list"><h3>Участники · {members.length}</h3>
+      <Button disabled={busy || !inviteUid.trim() || (members.length >= 10 && !members.some(member => member.uid === inviteUid.trim()))} onClick={() => void action(invite)}>Добавить участника</Button>
+      <div className="member-list"><h3>Участники · {members.length}/10</h3>
       {members.map(member => <div className="member-row" key={member.uid}>
-        <span className="member-avatar" style={{ color: participantColor(member.uid) }}><Icon name="user" size={18} /></span>
+        <span className="member-avatar" style={{ color: participantColor(member.uid, member.color) }}><Icon name="user" size={18} /></span>
         <span className="member-identity" title={member.uid}><span>{member.uid === account.accountId ? 'Вы' : `${member.uid.slice(0, 8)}…${member.uid.slice(-4)}`}</span><small>{member.uid === account.accountId ? 'Владелец' : 'Приглашённый участник'}</small></span>
         {member.uid !== account.accountId && <><RoleDropdown compact value={member.role as 'editor' | 'viewer'} change={role => void action(() => invite(member.uid, role))} disabled={busy} /><Button icon="trash" label="Убрать доступ" disabled={busy} onClick={() => void action(async () => { await socket.current!.request('boards.removeMember', { boardId: selected!.id, uid: member.uid }); setMembers(await socket.current!.request('boards.members', { boardId: selected!.id })); })} /></>}
       </div>)}</div>
