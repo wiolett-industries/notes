@@ -9,6 +9,7 @@ export type EntityIndex = Map<string, Entry>;
 const metadataSchema = z.object({
   version: z.literal(1), notes: z.array(z.string().uuid()).max(1000),
   groups: z.array(z.string().uuid()).max(500), connections: z.array(z.string().uuid()).max(4000),
+  images: z.array(z.string().uuid()).max(1000).default([]),
 }).strict();
 const integritySchema = z.object({ version: z.literal(1), root: z.string().length(43), count: z.number().int().min(3).max(MAX_ENTITIES) }).strict();
 const aad = (account: string, id: string, revision: number) => encoder.encode(JSON.stringify(['notes-entities', 2, account, id, revision]));
@@ -27,11 +28,13 @@ async function decrypt(key: CryptoKey, account: string, id: string, revision: nu
   return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromBase64(envelope.iv), additionalData: aad(account, id, revision) }, key, fromBase64(envelope.ciphertext)));
 }
 function* records(board: BoardData): Generator<[string, unknown]> {
-  yield ['meta', { version: 1, notes: board.notes.map(n => n.id), groups: board.groups.map(g => g.id), connections: board.connections.map(e => e.id) }];
+  yield ['meta', { version: 1, notes: board.notes.map(n => n.id), groups: board.groups.map(g => g.id), connections: board.connections.map(e => e.id), images: board.notes.filter(n => n.kind === 'image' || n.image).map(n => n.id) }];
   yield ['camera', board.camera];
   yield ['lockKeys', board.lockKeys ?? null];
   for (const note of board.notes) {
-    yield [`note-content:${note.id}`, { kind: note.kind, title: note.title, text: note.text, image: note.image, sealed: note.sealed, mentions: note.mentions }];
+    const hasImage = note.kind === 'image' || Boolean(note.image);
+    yield [`note-content:${note.id}`, { kind: note.kind, title: note.title, text: note.text, sealed: hasImage ? undefined : note.sealed, mentions: note.mentions }];
+    if (hasImage) yield [`note-image:${note.id}`, { image: note.image, sealed: note.sealed }];
     yield [`note-layout:${note.id}`, { x: note.x, y: note.y, width: note.width, height: note.height, color: note.color, pinned: note.pinned }];
   }
   for (const group of board.groups) yield [`group:${group.id}`, group];
@@ -53,7 +56,7 @@ export async function prepareDelta(key: CryptoKey, accountId: string, revision: 
       if (old?.fingerprint === fingerprint) { index.set(id, old); continue; }
       const envelope = await encrypt(key, accountId, id, revision + 1, bytes);
       index.set(id, { revision: revision + 1, hash: await cipherHash(envelope), fingerprint });
-      upserts.push({ id, envelope });
+      upserts.push({ id, envelope, ...(address.startsWith('note-image:') ? { storage: 'file' as const } : {}) });
     } finally { bytes.fill(0); }
   }
   const deletes = [...(previous?.keys() ?? [])].filter(id => !index.has(id));
@@ -100,10 +103,10 @@ export async function decodeVault(key: CryptoKey, vault: Vault): Promise<{ board
   }
   function object(address: string) { return z.record(z.string(), z.unknown()).parse(read(address)); }
   const meta = metadataSchema.parse(read('meta'));
-  if (values.size !== 3 + meta.notes.length * 2 + meta.groups.length + meta.connections.length) throw new Error('В доске обнаружены лишние объекты.');
+  if (new Set(meta.images).size !== meta.images.length || meta.images.some(id => !meta.notes.includes(id)) || values.size !== 3 + meta.notes.length * 2 + meta.images.length + meta.groups.length + meta.connections.length) throw new Error('В доске обнаружены лишние объекты.');
   const board = boardSchema.parse({
     version: 1, camera: read('camera'), lockKeys: read('lockKeys') ?? undefined,
-    notes: meta.notes.map(id => ({ id, ...object(`note-content:${id}`), ...object(`note-layout:${id}`) })),
+    notes: meta.notes.map(id => ({ id, ...object(`note-content:${id}`), ...object(`note-layout:${id}`), ...(meta.images.includes(id) ? object(`note-image:${id}`) : {}) })),
     groups: meta.groups.map(id => read(`group:${id}`)), connections: meta.connections.map(id => read(`connection:${id}`)),
   });
   return { board, index };

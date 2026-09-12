@@ -61,13 +61,13 @@ export const saveSchema = z.object({
   revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1),
   envelope: envelopeSchema,
 }).strict();
-export const MAX_ENTITIES = 6503;
+export const MAX_ENTITIES = 7503;
 export const encryptedEntitySchema = z.object({
   id: base64url.length(43),
   revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1),
   envelope: envelopeSchema,
 }).strict();
-export const entityWriteSchema = encryptedEntitySchema.omit({ revision: true });
+export const entityWriteSchema = encryptedEntitySchema.omit({ revision: true }).extend({ storage: z.literal('file').optional() });
 export const manifestSchema = envelopeSchema.extend({ ciphertext: base64url.min(22).max(4096) });
 export const deltaSchema = z.object({
   accountId: base64url.length(43),

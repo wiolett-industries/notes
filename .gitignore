@@ -5,6 +5,7 @@ dist/
 .env.*
 !.env.example
 *.sqlite*
+*.enc
 data/
 playwright-report/
 test-results/

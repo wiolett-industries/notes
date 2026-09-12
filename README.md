@@ -29,6 +29,7 @@ docker run -d --name notes --restart unless-stopped \
   -e ORIGIN=https://notes.example.com \
   -e RP_ID=notes.example.com \
   -v notes-data:/data \
+  -v notes-images:/images \
   notes
 ```
 
@@ -36,4 +37,6 @@ docker run -d --name notes --restart unless-stopped \
 
 Контейнер запускается от пользователя `node`. SQLite сохраняется в томе `notes-data` по пути `/data/notes.sqlite`; не удаляйте том при обновлении контейнера. Для резервного копирования SQLite используйте согласованный snapshot/SQLite backup, учитывая WAL, либо остановите контейнер перед копированием каталога `/data`.
 
-Переменные: `ORIGIN`, `RP_ID`, `HOST` (в контейнере `0.0.0.0`), `PORT` (3001), `DATABASE_PATH` и `NODE_ENV` (в контейнере `production`). Проверка доступности: `GET /api/health`.
+Изображения шифруются в браузере как отдельные объекты и хранятся файлами `.enc` в томе `notes-images`. В SQLite сохраняются только ссылки и размеры этих объектов. Каталог задаётся через `IMAGES_PATH` (в контейнере `/images`, локально `data/images`). Он не раздаётся как статика: файлы читаются через авторизованный запрос доски. При удалении или замене изображения его старый файл удаляется после сохранения изменений. Для резервной копии нужны оба тома; остановите контейнер перед их совместным копированием.
+
+Переменные: `ORIGIN`, `RP_ID`, `HOST` (в контейнере `0.0.0.0`), `PORT` (3001), `DATABASE_PATH`, `IMAGES_PATH` и `NODE_ENV` (в контейнере `production`). Проверка доступности: `GET /api/health`.

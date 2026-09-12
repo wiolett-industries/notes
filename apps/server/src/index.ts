@@ -14,7 +14,7 @@ if (production && !existsSync(resolve(frontend, 'index.html'))) throw new Error(
 if (production && (!process.env.ORIGIN || !process.env.RP_ID)) throw new Error('Set ORIGIN and RP_ID in production.');
 const origin = process.env.ORIGIN ?? 'http://localhost:5173';
 if (production && !origin.startsWith('https://')) throw new Error('Production ORIGIN must use HTTPS.');
-const store = openStore(process.env.DATABASE_PATH ?? resolve(root, 'data/quiet.sqlite'));
+const store = openStore(process.env.DATABASE_PATH ?? resolve(root, 'data/quiet.sqlite'), process.env.IMAGES_PATH ?? resolve(root, 'data/images'));
 const app = createApp(store, { origin, rpID: process.env.RP_ID ?? 'localhost', clientAddress: c => getConnInfo(c).remote.address ?? 'local' });
 app.get('/assets/*', serveStatic({ root: frontend, onFound: (_path, c) => { c.header('Cache-Control', 'public, max-age=31536000, immutable'); } }));
 app.get('/favicon.svg', serveStatic({ path: resolve(frontend, 'favicon.svg') }));
