@@ -1,0 +1,58 @@
+.board-peer-cursors {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 8;
+}
+
+.board-peer-cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 3px;
+  color: var(--peer-color, #405f86);
+  pointer-events: none;
+  transition: transform 50ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-peer-cursor { transition: none; }
+}
+
+.board-peer-cursor span {
+  margin-top: 16px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: var(--peer-color, #405f86);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.note.remote-selected:not(.selected):not(.multi-selected) {
+  outline: 2px solid var(--peer-color);
+  outline-offset: 5px;
+}
+
+/* Keep the local selection outline and its tools; add a separate remote ring. */
+.note.remote-selected:is(.selected, .multi-selected) {
+  box-shadow: 0 0 0 6px var(--peer-color);
+}
+
+.board-remote-selection-label {
+  position: absolute;
+  transform: translateY(calc(-100% - 9px));
+  z-index: 3;
+  pointer-events: none;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: var(--peer-color);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+}

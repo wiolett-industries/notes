@@ -40,8 +40,8 @@ export function pasteSelection(board: BoardData, source: BoardData, offset: { x:
   }));
   const groups = source.groups.map(group => ({ ...group, id: ids.get(group.id)!, noteIds: group.noteIds.map(id => ids.get(id)!) }));
   const connections = source.connections.map(edge => ({ ...edge, id: crypto.randomUUID(), source: ids.get(edge.source)!, target: ids.get(edge.target)! }));
-  if (board.notes.length + notes.length > 1000 || board.groups.length + groups.length > 500 || board.connections.length + connections.length > 4000) throw new Error('Недостаточно места на доске для вставки.');
+  if (board.notes.length + notes.length > 10000 || board.groups.length + groups.length > 5000 || board.connections.length + connections.length > 40000) throw new Error('Недостаточно места на доске для вставки.');
   const next = boardSchema.parse({ ...board, notes: [...board.notes, ...notes], groups: [...board.groups, ...groups], connections: [...board.connections, ...connections] });
-  if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error('Вставка превысит размер доски (23 МБ).');
+  if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error('Вставка превысит размер доски (92 МБ).');
   return { board: next, ids: notes.map(note => note.id) };
 }

@@ -3,24 +3,54 @@ import type { ComponentChildren } from 'preact';
 import { colors, GRID_SIZE, MAX_BOARD_BYTES, type BoardData, type NoteData, type NoteColor, type ConnectionData, type GroupData } from '@quiet/shared';
 import { Button, Icon } from './ui';
 import { Connections } from './Connections';
-import { clamp, snap, center, routeConnections, draftConnection, magneticTarget, groupBounds, cleanGroups, contains, intersects, type Point, type Rect, type Endpoint } from './geometry';
+import { clamp, snap, center, prepareConnectionRouting, routePreparedConnections, draftConnection, magneticTarget, groupBounds, cleanGroups, contains, intersects, type Point, type Rect, type Endpoint } from './geometry';
 import { readImage } from './images';
 import { UndoToast } from './UndoToast';
 import { SearchPopover } from './SearchPopover';
 import { CLIPBOARD_PREFIX, copySelection, writeSelection, readSelection, pasteSelection } from './board-clipboard';
 import { NoteBody } from './NoteBody';
 import { mentionConnections, mentionIds } from './markdown';
+import './board-cursors.css';
+import { participantColor as peerColor } from './participant-color';
 
 const labels: Record<NoteColor, string> = { sand: 'Песочный', sage: 'Шалфей', rose: 'Розовый', lavender: 'Лавандовый', sky: 'Голубой' };
-type Props = { board: BoardData; onChange: (board: BoardData) => void; locked?: boolean; noteBusy?: string | null; onToggleLock: (id: string) => Promise<void>; actions?: ComponentChildren; clipboardKey: CryptoKey; accountId: string; interactionBlocked?: boolean };
+type DragPosition = { id: string; x: number; y: number; width: number; height: number };
+type Props = { board: BoardData; onChange: (board: BoardData) => void; locked?: boolean; noteBusy?: string | null; onToggleLock: (id: string) => Promise<void>; actions?: ComponentChildren; clipboardKey: CryptoKey; accountId: string; interactionBlocked?: boolean; role?: 'owner' | 'editor' | 'viewer'; peers?: { id: string; uid: string; role: string; x: number; y: number; selection?: string[] }[]; onCursor?: (point: Point | null) => void; onSelection?: (ids: string[]) => void; onDrag?: (positions: DragPosition[] | null) => void; dragPreviews?: Record<string, Omit<DragPosition, 'id'>> };
 type Gesture = { kind: 'pan' | 'note' | 'resize' | 'connect' | 'selection' | 'group'; pointer: number; start: Point; camera: BoardData['camera']; note?: NoteData; edge?: string; moved?: NoteData[]; bounds?: ReturnType<typeof groupBounds>; selection?: string[]; group?: string };
 type Draft = { source: string; point: Point; target?: string };
-export function Board({ board: incoming, onChange, locked = false, noteBusy = null, onToggleLock, actions, clipboardKey, accountId, interactionBlocked = false }: Props) {
-  const board = useMemo(() => ({ ...incoming, connections: incoming.connections ?? [], groups: incoming.groups ?? [], notes: incoming.notes.map(note => ({ ...note, title: note.title ?? 'Заметка', kind: note.kind ?? 'text', width: note.width ?? 272, height: note.height ?? 248 })) }), [incoming]);
+export function Board({ board: incoming, onChange, locked = false, noteBusy = null, onToggleLock, actions, clipboardKey, accountId, interactionBlocked = false, role = 'owner', peers = [], onCursor, onSelection, onDrag, dragPreviews }: Props) {
+  const board = incoming;
   const root = useRef<HTMLDivElement>(null);
   const current = useRef(board); current.current = board;
-  const catalogSignature = JSON.stringify(board.notes.map(note => [note.id, note.title]));
-  const noteCatalog = useMemo(() => board.notes.map(({ id, title }) => ({ id, title })), [catalogSignature]);
+  const access = useRef(role); access.current = role;
+  const indexCache = useRef<{ notes: NoteData[]; groups: GroupData[]; byId: Map<string, NoteData>; protectedMembers: Set<string> } | null>(null);
+  function noteIndex() {
+    const { notes, groups } = current.current;
+    if (indexCache.current?.notes === notes && indexCache.current.groups === groups) return indexCache.current;
+    const byId = new Map(notes.map(note => [note.id, note]));
+    const protectedMembers = new Set<string>();
+    for (const group of groups) if (group.noteIds.some(id => { const note = byId.get(id); return note?.sealed || note?.pinned; })) {
+      for (const id of group.noteIds) protectedMembers.add(id);
+    }
+    return indexCache.current = { notes, groups, byId, protectedMembers };
+  }
+  const writable = role !== 'viewer';
+  function canWrite() { return access.current !== 'viewer'; }
+  function canEdit(note: NoteData) { return access.current === 'owner' || (access.current === 'editor' && !note.sealed && !note.pinned); }
+  function canMove(note: NoteData) { return access.current !== 'viewer' && !note.pinned; }
+  function canGroup(ids: string[]) {
+    if (access.current === 'owner') return true;
+    if (access.current === 'viewer') return false;
+    const { byId, protectedMembers } = noteIndex();
+    return ids.every(id => { const note = byId.get(id); return note && canEdit(note) && !protectedMembers.has(id); });
+  }
+  const catalogCache = useRef<{ id: string; title: string }[]>([]);
+  const noteCatalog = useMemo(() => {
+    const previous = catalogCache.current;
+    if (previous.length === board.notes.length && board.notes.every((note, index) => note.id === previous[index].id && note.title === previous[index].title)) return previous;
+    return catalogCache.current = board.notes.map(({ id, title }) => ({ id, title }));
+  }, [board.notes]);
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const [selected, select] = useState<string | null>(null);
   const [mode, setMode] = useState<'select' | 'hand' | 'connect' | 'group'>('select');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -52,9 +82,55 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
   const pointers = useRef(new Map<number, Point>());
   const gesture = useRef<Gesture | null>(null);
   const pinch = useRef<{ distance: number; midpoint: Point; camera: BoardData['camera'] } | null>(null);
-  function update(next: BoardData) { current.current = next; onChange(next); }
+  const dragCallback = useRef(onDrag); dragCallback.current = onDrag;
+  const dragFrame = useRef<number | null>(null);
+  const pendingDrag = useRef<DragPosition[] | null>(null);
+  function endDragPreview() {
+    if (dragFrame.current !== null) cancelAnimationFrame(dragFrame.current);
+    dragFrame.current = null; pendingDrag.current = null;
+    dragCallback.current?.(null);
+  }
+  function previewDrag(ids: string[]) {
+    if (!canWrite() || !dragCallback.current) return;
+    const { byId } = noteIndex();
+    pendingDrag.current = ids.flatMap(id => {
+      const note = byId.get(id);
+      return note && canMove(note) ? [{ id, x: note.x, y: note.y, width: note.width, height: note.height }] : [];
+    });
+    if (dragFrame.current !== null) return;
+    dragFrame.current = requestAnimationFrame(() => {
+      dragFrame.current = null;
+      if (canWrite() && pendingDrag.current?.length) dragCallback.current?.(pendingDrag.current);
+      pendingDrag.current = null;
+    });
+  }
+  function update(next: BoardData) {
+    const previous = current.current;
+    if (access.current === 'viewer') return;
+    if (access.current === 'editor') {
+      const originals = noteIndex().byId;
+      const notes = next.notes.flatMap(note => {
+        const original = originals.get(note.id);
+        if (!original) return note.sealed || note.pinned ? [] : [note];
+        if (original.pinned) return [original];
+        if (original.sealed) return [{ ...original, x: note.x, y: note.y, width: note.width, height: note.height }];
+        return [{ ...note, pinned: original.pinned, sealed: original.sealed }];
+      });
+      const remainingIds = new Set(notes.map(note => note.id));
+      for (const note of previous.notes) if (!canEdit(note) && !remainingIds.has(note.id)) notes.push(note);
+      const protectedIds = new Set(previous.notes.filter(note => !canEdit(note)).map(note => note.id));
+      const protectedGroups = previous.groups.filter(group => group.noteIds.some(id => protectedIds.has(id)));
+      const protectedGroupIds = new Set(protectedGroups.map(group => group.id));
+      const reservedIds = new Set([...protectedIds, ...protectedGroups.flatMap(group => group.noteIds)]);
+      const groups = next.groups.filter(group => !protectedGroupIds.has(group.id)).map(group => ({ ...group, noteIds: group.noteIds.filter(id => !reservedIds.has(id)) }));
+      next = cleanGroups({ ...next, lockKeys: previous.lockKeys, notes, groups: [...groups, ...protectedGroups] });
+    }
+    current.current = next; onChange(next);
+  }
   function camera(value: BoardData['camera']) {
-    update({ ...current.current, camera: { x: clamp(value.x, -1e9, 1e9), y: clamp(value.y, -1e9, 1e9), zoom: clamp(value.zoom, .15, 3) } });
+    // Camera changes stay local and never pass through data-mutation guards.
+    const next = { ...current.current, camera: { x: clamp(value.x, -1e9, 1e9), y: clamp(value.y, -1e9, 1e9), zoom: clamp(value.zoom, .15, 3) } };
+    current.current = next; onChange(next);
   }
   function local(point: Point) {
     const rect = root.current!.getBoundingClientRect(); return { x: point.x - rect.left, y: point.y - rect.top };
@@ -64,15 +140,31 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     return { x: (p.x - cam.x) / cam.zoom, y: (p.y - cam.y) / cam.zoom };
   }
   function setConnection(value: Draft | null) { draftRef.current = value; setDraft(value); }
-  function chooseMode(value: typeof mode) { setMode(value); setConnection(null); setEditing(null); editEdge(null); editGroup(null); }
+  function chooseMode(value: typeof mode) { if (access.current === 'viewer' && (value === 'connect' || value === 'group')) return; setMode(value); setConnection(null); setEditing(null); editEdge(null); editGroup(null); }
   function clearSelection() {
     select(null); selectEdge(null); selectGroup(null); setSelectedIds([]); setSelectionRect(null);
     setConnection(null); setEditing(null); editEdge(null); editGroup(null);
   }
   function selectedNotes() {
     const ids = selectedIds.length ? selectedIds : selected ? [selected] : current.current.groups.find(g => g.id === selectedGroup)?.noteIds ?? [];
-    return ids.filter(id => current.current.notes.some(note => note.id === id));
+    const { byId } = noteIndex();
+    return ids.filter(id => byId.has(id));
   }
+  const selectionCallback = useRef(onSelection); selectionCallback.current = onSelection;
+  const selectionSignature = useMemo(() => JSON.stringify([...new Set(selectedNotes())].sort()), [selected, selectedIds, selectedGroup, board.notes, board.groups]);
+  useEffect(() => { selectionCallback.current?.(JSON.parse(selectionSignature) as string[]); }, [selectionSignature]);
+  const remoteSelections = useMemo(() => {
+    const byNote = new Map<string, Set<string>>();
+    for (const peer of peers) for (const id of peer.selection ?? []) {
+      let users = byNote.get(id);
+      if (!users) { users = new Set(); byNote.set(id, users); }
+      users.add(peer.uid);
+    }
+    return new Map([...byNote].map(([id, users]) => {
+      const uids = [...users].sort();
+      return [id, { uids, color: peerColor(uids[0]), label: `${uids[0].slice(0, 8)}${uids.length > 1 ? ` +${uids.length - 1}` : ''}` }];
+    }));
+  }, [peers]);
   function openSearch() {
     setSearchOpen(true); setEditing(null); editEdge(null); editGroup(null); setConnection(null);
     requestAnimationFrame(() => { const input = root.current?.querySelector<HTMLInputElement>('.search-popover input'); input?.focus({ preventScroll: true }); input?.select(); });
@@ -102,6 +194,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     if (searchMatches.length) setSearchIndex(index => (index + direction + searchMatches.length) % searchMatches.length);
   }
   async function copyNotes(cut: boolean) {
+    if (cut && access.current === 'viewer') return;
     const ids = selectedNotes();
     if (!ids.length || clipboardBusy.current || noteBusy || interactionBlocked) return;
     clipboardBusy.current = true; setClipboardWorking(true);
@@ -112,7 +205,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
       lastPaste.current = { signature: '', count: 0 };
       if (cut) {
         const copied = new Map(snapshot.notes.map(note => [note.id, JSON.stringify(note)]));
-        const unchanged = new Set(current.current.notes.filter(note => copied.get(note.id) === JSON.stringify(note)).map(note => note.id));
+        const unchanged = new Set(current.current.notes.filter(note => canEdit(note) && copied.get(note.id) === JSON.stringify(note)).map(note => note.id));
         update(cleanGroups({ ...current.current, notes: current.current.notes.filter(note => !unchanged.has(note.id)) }));
         clearSelection(); setLastDeleted(null);
         if (unchanged.size !== ids.length) setNotice('Изменённые во время копирования заметки оставлены на доске.');
@@ -121,10 +214,13 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     finally { clipboardBusy.current = false; if (alive.current) setClipboardWorking(false); }
   }
   async function pasteNotes(text: string) {
+    if (access.current === 'viewer') return;
     if (clipboardBusy.current || noteBusy || interactionBlocked) return;
     clipboardBusy.current = true; setClipboardWorking(true);
     try {
       const copied = await readSelection(clipboardKey, accountId, text);
+      if (!canWrite()) return;
+      if (access.current === 'editor' && copied.notes.some(note => note.sealed || note.pinned)) { setNotice('Нельзя вставить защищённые заметки.'); return; }
       if (!alive.current || !copied.notes.length) return;
       const rect = root.current!.getBoundingClientRect(), cam = current.current.camera;
       const left = Math.min(...copied.notes.map(n => n.x)), top = Math.min(...copied.notes.map(n => n.y));
@@ -145,32 +241,43 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     return (id !== source && endpoints().find(n => n.id === id)) || magneticTarget(endpoints(), world({ x: e.clientX, y: e.clientY }), source, current.current.camera.zoom);
   }
   function makeGroup() {
-    const ids = selectedIds.filter(id => current.current.notes.some(note => note.id === id));
+    const ids = selectedIds.filter(id => noteIndex().byId.has(id));
+    if (!canGroup(ids)) return;
     if (ids.length < 2) return;
     if (current.current.groups.length >= 500) { setNotice('На доске уже 500 групп.'); return; }
     const group = { id: crypto.randomUUID(), title: 'Группа', noteIds: ids };
-    const groups = current.current.groups.map(g => ({ ...g, noteIds: g.noteIds.filter(id => !ids.includes(id)) }));
+    const groupedIds = new Set(ids);
+    const groups = current.current.groups.map(g => ({ ...g, noteIds: g.noteIds.filter(id => !groupedIds.has(id)) }));
     update(cleanGroups({ ...current.current, groups: [...groups, group] }));
     selectGroup(group.id); setSelectedIds([]); select(null); chooseMode('group');
   }
   function ungroup(id: string) {
+    if (!canGroup(current.current.groups.find(group => group.id === id)?.noteIds ?? [])) return;
     update(cleanGroups({ ...current.current, groups: current.current.groups.filter(g => g.id !== id) }));
     selectGroup(null); editGroup(null);
   }
   function assignGroups(ids: string[], bounds: ReturnType<typeof groupBounds>) {
-    let groups = current.current.groups;
+    if (access.current === 'viewer') return;
+    const { byId } = noteIndex();
+    const assigned = new Set<string>();
+    const additions = new Map<string, string[]>();
+    const eligibleBounds = bounds.filter(rect => canGroup(rect.noteIds));
     for (const id of ids) {
-      const note = current.current.notes.find(n => n.id === id);
-      if (!note) continue;
-      const target = bounds.filter(rect => contains(rect, center(note))).sort((a, b) => a.width * a.height - b.width * b.height)[0];
-      groups = groups.map(g => ({ ...g, noteIds: [...g.noteIds.filter(member => member !== id), ...(g.id === target?.id ? [id] : [])] }));
+      const note = byId.get(id);
+      if (!note || !canGroup([id])) continue;
+      const point = center(note);
+      let target: typeof bounds[number] | undefined;
+      for (const rect of eligibleBounds) if (contains(rect, point) && (!target || rect.width * rect.height < target.width * target.height)) target = rect;
+      assigned.add(id);
+      if (target) { const members = additions.get(target.id) ?? []; members.push(id); additions.set(target.id, members); }
     }
+    const groups = current.current.groups.map(group => ({ ...group, noteIds: [...group.noteIds.filter(id => !assigned.has(id)), ...(additions.get(group.id) ?? [])] }));
     update(cleanGroups({ ...current.current, groups }));
   }
   function startEditing(id: string, field: 'title' | 'text') {
     if (hand || mode === 'connect' || locked || noteBusy === id) return;
     const note = current.current.notes.find(n => n.id === id);
-    if (!note || note.kind === 'image' || (note.sealed && field === 'text')) return;
+    if (!note || !canEdit(note) || note.kind === 'image' || (note.sealed && field === 'text')) return;
     select(id); setEditing({ id, field });
     requestAnimationFrame(() => {
       const input = root.current?.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[data-note="${id}"] ${field === 'title' ? 'input' : 'textarea'}`);
@@ -186,8 +293,8 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     camera({ zoom: next, x: pivot.x - (pivot.x - old.x) * next / old.zoom, y: pivot.y - (pivot.y - old.y) * next / old.zoom });
   }
   function add(point?: Point) {
-    if (locked) return;
-    if (current.current.notes.length >= 1000) { setNotice('На доске уже 1000 заметок. Удалите ненужные, чтобы добавить новую.'); return; }
+    if (locked || access.current === 'viewer') return;
+    if (current.current.notes.length >= 10000) { setNotice('На доске уже 10000 заметок. Удалите ненужные, чтобы добавить новую.'); return; }
     const rect = root.current!.getBoundingClientRect();
     const p = point ?? { x: rect.width / 2, y: rect.height / 2 };
     const cam = current.current.camera;
@@ -196,6 +303,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     update({ ...current.current, notes: [...current.current.notes, note] }); assignGroups([note.id], bounds); select(note.id); setSelectedIds([]); chooseMode('select');
   }
   function patch(id: string, patch: Partial<NoteData>) {
+    if (access.current === 'viewer') return;
     update({ ...current.current, notes: current.current.notes.map(n => {
       if (n.id !== id) return n;
       const next = { ...n, ...patch, ...(n.sealed && patch.title !== undefined ? { sealed: { ...n.sealed, visibleTitle: true } } : {}) };
@@ -206,37 +314,38 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
   }
   function remove(id: string) {
     const note = current.current.notes.find(n => n.id === id);
-    if (!note || noteBusy === id) return;
+    if (!note || !canEdit(note) || noteBusy === id) return;
     const group = current.current.groups.find(g => g.noteIds.includes(id));
     const removed = new Set([id, ...(group?.noteIds.length === 1 ? [group.id] : [])]);
     setLastDeleted({ note, group, connections: current.current.connections.filter(edge => removed.has(edge.source) || removed.has(edge.target)) });
     update(cleanGroups({ ...current.current, notes: current.current.notes.filter(n => n.id !== id) })); select(null); setSelectedIds(ids => ids.filter(item => item !== id)); setEditing(null); setConnection(null);
   }
-  function removeEdge(id: string) { if (id.startsWith('mention:')) return; update({ ...current.current, connections: current.current.connections.filter(edge => edge.id !== id) }); selectEdge(null); editEdge(null); }
+  function removeEdge(id: string) { if (access.current === 'viewer' || id.startsWith('mention:')) return; update({ ...current.current, connections: current.current.connections.filter(edge => edge.id !== id) }); selectEdge(null); editEdge(null); }
   function connect(source: string, target: string) {
+    if (access.current === 'viewer') return;
     if (source === target) return;
     const edges = current.current.connections;
     const existing = edges.find(edge => edge.source === source && edge.target === target);
     if (existing) { selectEdge(existing.id); setConnection(null); return; }
-    if (edges.length >= 4000) { setNotice('На доске уже 4000 связей.'); setConnection(null); return; }
+    if (edges.length >= 40000) { setNotice('На доске уже 40000 связей.'); setConnection(null); return; }
     const edge: ConnectionData = { id: crypto.randomUUID(), source, target, label: '', style: 'solid' };
     update({ ...current.current, connections: [...edges, edge] }); selectEdge(edge.id); select(null); setConnection(null);
   }
   async function addImages(files: File[], point?: Point) {
-    if (locked || imageBusy) return;
+    if (locked || imageBusy || access.current === 'viewer') return;
     setImageBusy(true);
     try {
       for (const [index, file] of files.entries()) {
         const decoded = await readImage(file);
-        if (!alive.current) return;
-        if (current.current.notes.length >= 1000) throw new Error('На доске уже 1000 заметок.');
+        if (!alive.current || !canWrite()) return;
+        if (current.current.notes.length >= 10000) throw new Error('На доске уже 10000 заметок.');
         const rect = root.current!.getBoundingClientRect(), cam = current.current.camera;
         const p = point ?? { x: (rect.width / 2 - cam.x) / cam.zoom, y: (rect.height / 2 - cam.y) / cam.zoom };
         const width = clamp(snap(decoded.ratio >= 1 ? 320 : 240), 160, 2048);
         const height = clamp(snap(width / decoded.ratio + 40), 120, 640);
         const note: NoteData = { id: crypto.randomUUID(), kind: 'image', title: file.name.slice(0, 240), text: '', pinned: false, mentions: [], color: 'sky', width, height, image: decoded.image, x: clamp(snap(p.x - width / 2 + index * 24), -1e9, 1e9), y: clamp(snap(p.y - height / 2 + index * 24), -1e9, 1e9) };
         const next = { ...current.current, notes: [...current.current.notes, note] };
-        if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error('На доске недостаточно места для картинки (лимит 23 МБ).');
+        if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error('На доске недостаточно места для картинки (лимит 92 МБ).');
         const bounds = groupBounds(current.current.groups, current.current.notes);
         update(next); assignGroups([note.id], bounds); select(note.id); setSelectedIds([]); chooseMode('select');
       }
@@ -265,10 +374,27 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     el.addEventListener('wheel', wheel, { passive: false });
     return () => el.removeEventListener('wheel', wheel);
   }, [locked]);
-  useEffect(() => { alive.current = true; return () => { alive.current = false; clearTimeout(focusTimer.current); }; }, []);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; clearTimeout(focusTimer.current); endDragPreview(); }; }, []);
+  useEffect(() => {
+    const element = root.current!;
+    const measure = () => {
+      const { width, height } = element.getBoundingClientRect();
+      setViewportSize(previous => previous.width === width && previous.height === height ? previous : { width, height });
+    };
+    measure();
+    const observer = new ResizeObserver(measure); observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    clearSelection(); setMode('select'); setLastDeleted(null);
+    endDragPreview();
+    gesture.current = null; pinch.current = null; pointers.current.clear(); setDragging(false);
+    for (const [id, element] of captures.current) if (element.hasPointerCapture(id)) element.releasePointerCapture(id);
+    captures.current.clear();
+  }, [role]);
   useEffect(() => {
     function paste(e: ClipboardEvent) {
-      if (locked || interactionBlocked || (e.target as HTMLElement).closest('input, textarea, [contenteditable]')) return;
+      if (locked || access.current === 'viewer' || interactionBlocked || (e.target as HTMLElement).closest('input, textarea, [contenteditable]')) return;
       const text = e.clipboardData?.getData('text/plain') ?? '';
       if (text.startsWith(CLIPBOARD_PREFIX)) { e.preventDefault(); void pasteNotes(text); return; }
       const files = [...(e.clipboardData?.files ?? [])].filter(file => file.type.startsWith('image/'));
@@ -281,7 +407,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     }
     window.addEventListener('copy', copy); window.addEventListener('cut', copy);
     return () => { window.removeEventListener('paste', paste); window.removeEventListener('copy', copy); window.removeEventListener('cut', copy); };
-  }, [locked, imageBusy, interactionBlocked, selected, selectedIds, selectedGroup, noteBusy]);
+  }, [locked, imageBusy, interactionBlocked, selected, selectedIds, selectedGroup, noteBusy, role]);
   useEffect(() => {
     const editing = (e: KeyboardEvent) => (e.target as HTMLElement).matches('textarea, input, [contenteditable]');
     function down(e: KeyboardEvent) {
@@ -297,7 +423,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
         // access do not require a second permission prompt.
         if (e.code === 'Space') {
           e.preventDefault(); setSpace(false);
-          if (!e.repeat) { const modes = ['select', 'hand', 'connect'] as const; chooseMode(modes[(modes.indexOf(mode as typeof modes[number]) + 1) % modes.length]); }
+          if (!e.repeat) { const modes: (typeof mode)[] = access.current === 'viewer' ? ['select', 'hand'] : ['select', 'hand', 'connect']; chooseMode(modes[(modes.indexOf(mode) + 1) % modes.length]); }
           return;
         }
         return;
@@ -310,10 +436,10 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
       if (e.key === '0' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); fit(); }
     }
     function up(e: KeyboardEvent) { if (e.code === 'Space') setSpace(false); }
-    function blur() { setSpace(false); pointers.current.clear(); gesture.current = null; pinch.current = null; setDragging(false); }
+    function blur() { setSpace(false); pointers.current.clear(); gesture.current = null; pinch.current = null; setDragging(false); endDragPreview(); }
     window.addEventListener('keydown', down); window.addEventListener('keyup', up); window.addEventListener('blur', blur);
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', blur); };
-  }, [locked, selected, selectedEdge, selectedIds, selectedGroup, noteBusy, mode, interactionBlocked]);
+  }, [locked, selected, selectedEdge, selectedIds, selectedGroup, noteBusy, mode, interactionBlocked, role]);
   function pointerDown(e: PointerEvent) {
     if (locked || interactionBlocked || e.button > 1) return;
     const target = e.target as HTMLElement;
@@ -326,7 +452,9 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     if (!pan && target.closest('input, textarea')) return;
     e.preventDefault();
     root.current!.focus({ preventScroll: true });
-    const capture = target instanceof Element ? target : root.current!;
+    // Pan/selection must survive culling. Note targets stay mounted while
+    // selected/dragged and retain native click/dblclick dispatch for editing.
+    const capture = pan || e.shiftKey || (!noteEl && !groupEl) ? root.current! : target;
     capture.setPointerCapture(e.pointerId); captures.current.set(e.pointerId, capture);
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (e.shiftKey && e.button === 0) {
@@ -335,6 +463,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
       setSelectionRect({ ...point, width: 0, height: 0 }); select(null); selectGroup(null); setEditing(null); editGroup(null); selectEdge(null); setConnection(null); return;
     }
     if (pointers.current.size === 2) {
+      endDragPreview();
       const [a, b] = [...pointers.current.values()];
       pinch.current = { distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), midpoint: local({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }), camera: { ...current.current.camera } };
       gesture.current = null; setConnection(null); return;
@@ -345,7 +474,8 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     const edge = target.closest<HTMLElement>('[data-resize]')?.dataset.resize;
     const endpoint = note ?? group;
     const kind = endpoint && mode === 'connect' ? 'connect' : group ? 'group' : note ? edge ? 'resize' : 'note' : 'pan';
-    if (((kind === 'note' || kind === 'resize') && note?.pinned) || (kind === 'group' && group?.noteIds.some(id => current.current.notes.find(n => n.id === id)?.pinned))) {
+    if (access.current === 'viewer' && kind !== 'pan') { gesture.current = null; setConnection(null); return; }
+    if (((kind === 'note' || kind === 'resize') && note?.pinned) || (kind === 'group' && group?.noteIds.some(id => noteIndex().byId.get(id)?.pinned))) {
       gesture.current = null; setConnection(null); return;
     }
     if (kind === 'connect' && endpoint) {
@@ -353,10 +483,14 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
       setConnection({ source: source.id, point: world({ x: e.clientX, y: e.clientY }), target: source.id === endpoint.id ? undefined : endpoint.id });
     } else setConnection(null);
     const ids = group?.noteIds ?? (note && selectedIds.includes(note.id) ? selectedIds : note ? [note.id] : []);
+    const movedIds = new Set(ids);
     if (!note || !selectedIds.includes(note.id)) setSelectedIds([]);
-    gesture.current = { kind, pointer: e.pointerId, start: { x: e.clientX, y: e.clientY }, camera: { ...current.current.camera }, note, edge, group: group?.id, moved: current.current.notes.filter(n => ids.includes(n.id) && n.id !== noteBusy && !n.pinned), bounds: groupBounds(current.current.groups, current.current.notes) };
+    gesture.current = { kind, pointer: e.pointerId, start: { x: e.clientX, y: e.clientY }, camera: { ...current.current.camera }, note, edge, group: group?.id, moved: current.current.notes.filter(n => movedIds.has(n.id) && n.id !== noteBusy && !n.pinned), bounds: groupBounds(current.current.groups, current.current.notes) };
   }
   function pointerMove(e: PointerEvent) {
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    const overBoard = target && root.current?.contains(target) && !target.closest('.floating, .note-tools');
+    onCursor?.(overBoard ? world({ x: e.clientX, y: e.clientY }) : null);
     if (mode === 'connect' && draftRef.current && !pinch.current) {
       const point = world({ x: e.clientX, y: e.clientY });
       const target = connectionTarget(e, draftRef.current.source);
@@ -372,6 +506,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     }
     const g = gesture.current;
     if (!g || g.pointer !== e.pointerId) return;
+    if (access.current === 'viewer' && g.kind !== 'pan' && g.kind !== 'selection') return;
     const dx = e.clientX - g.start.x, dy = e.clientY - g.start.y;
     if (g.kind === 'selection') {
       const a = world(g.start), b = world({ x: e.clientX, y: e.clientY });
@@ -383,7 +518,8 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     if (g.kind === 'connect' || Math.hypot(dx, dy) < 3) return;
     setDragging(true);
     if (g.kind === 'resize' && g.note && g.edge) {
-      if (current.current.notes.find(n => n.id === g.note!.id)?.pinned) return;
+      const active = current.current.notes.find(n => n.id === g.note!.id);
+      if (!active || !canMove(active)) return;
       const note = g.note;
       const right = snap(note.x + note.width), bottom = snap(note.y + note.height);
       let x = snap(note.x), y = snap(note.y), width = snap(note.width), height = snap(note.height);
@@ -392,16 +528,19 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
       if (g.edge.includes('w')) { x = clamp(snap(note.x + dx / g.camera.zoom), right - 2048, right - 160); width = right - x; }
       if (g.edge.includes('n')) { y = clamp(snap(note.y + dy / g.camera.zoom), bottom - 2048, bottom - 120); height = bottom - y; }
       patch(note.id, { x: clamp(x, -1e9, 1e9), y: clamp(y, -1e9, 1e9), width, height });
+      previewDrag([note.id]);
     } else if ((g.kind === 'note' || g.kind === 'group') && g.moved?.length) {
       const moved = new Map(g.moved.map(note => [note.id, note]));
       update({ ...current.current, notes: current.current.notes.map(note => {
         const original = moved.get(note.id);
-        return original && !note.pinned ? { ...note, x: clamp(snap(original.x + dx / g.camera.zoom), -1e9, 1e9), y: clamp(snap(original.y + dy / g.camera.zoom), -1e9, 1e9) } : note;
+        return original && canMove(note) ? { ...note, x: clamp(snap(original.x + dx / g.camera.zoom), -1e9, 1e9), y: clamp(snap(original.y + dy / g.camera.zoom), -1e9, 1e9) } : note;
       }) });
+      previewDrag(g.moved.map(note => note.id));
     }
     else camera({ ...g.camera, x: g.camera.x + dx, y: g.camera.y + dy });
   }
   function pointerUp(e: PointerEvent) {
+    endDragPreview();
     if (gesture.current?.kind === 'connect' && draftRef.current && e.type !== 'pointercancel') {
       const value = draftRef.current;
       const target = connectionTarget(e, value.source);
@@ -424,61 +563,85 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     if (remaining) gesture.current = { kind: 'pan', pointer: remaining[0], start: remaining[1], camera: { ...current.current.camera } };
   }
   const cam = board.camera;
-  const groupRects = useMemo(() => groupBounds(board.groups, board.notes), [board.groups, board.notes]);
-  const connectionEndpoints = useMemo(() => [...groupRects, ...board.notes], [groupRects, board.notes]);
-  const routed = useMemo(() => routeConnections(connectionEndpoints, [...board.connections, ...mentionConnections(board.notes)]), [connectionEndpoints, board.connections, board.notes]);
+  const viewport = useMemo<Rect>(() => ({ x: (-cam.x - 300) / cam.zoom, y: (-cam.y - 300) / cam.zoom,
+    width: ((viewportSize.width || 1024) + 600) / cam.zoom, height: ((viewportSize.height || 768) + 600) / cam.zoom }), [cam.x, cam.y, cam.zoom, viewportSize]);
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const retainedNotes = new Set([selected, editing?.id, noteBusy, draft?.source, draft?.target, gesture.current?.note?.id, ...(gesture.current?.moved?.map(note => note.id) ?? [])]);
+  const visualNotes = useMemo(() => {
+    if (!dragPreviews || !Object.keys(dragPreviews).length) return board.notes;
+    return board.notes.map(note => {
+      const preview = dragPreviews[note.id];
+      return preview ? { ...note, x: preview.x, y: preview.y, width: preview.width, height: preview.height } : note;
+    });
+  }, [board.notes, dragPreviews]);
+  const visibleNotes = visualNotes.filter(note => retainedNotes.has(note.id) || intersects(note, viewport));
+  const groupRects = useMemo(() => groupBounds(board.groups, visualNotes), [board.groups, visualNotes]);
+  const visibleGroups = groupRects.filter(group => group.id === selectedGroup || group.id === editingGroup || group.id === gesture.current?.group || intersects(group, viewport));
+  const connectionEndpoints = useMemo(() => [...groupRects, ...visualNotes], [groupRects, visualNotes]);
+  const allConnections = useMemo(() => [...board.connections, ...mentionConnections(board.notes)], [board.connections, board.notes]);
+  const preparedRoutes = useMemo(() => prepareConnectionRouting(connectionEndpoints, allConnections), [connectionEndpoints, allConnections]);
+  const routed = useMemo(() => routePreparedConnections(preparedRoutes, viewport, new Set([selectedEdge, editingEdge].filter((id): id is string => Boolean(id)))), [preparedRoutes, viewport, selectedEdge, editingEdge]);
   const draftSource = connectionEndpoints.find(n => n.id === draft?.source);
   const draftPath = draft && draftSource ? draftConnection(draftSource, draft.point, connectionEndpoints.find(n => n.id === draft.target)).path : undefined;
   return <div ref={root} className={`board ${hand || space ? 'pan-mode' : ''} ${mode === 'connect' ? 'connect-mode' : ''} ${dragging ? 'dragging' : ''}`} tabIndex={locked ? -1 : 0} aria-label="Бесконечная доска" data-testid="board"
     style={{ backgroundSize: `${24 * cam.zoom}px ${24 * cam.zoom}px, ${GRID_SIZE * cam.zoom}px ${GRID_SIZE * cam.zoom}px`, backgroundPosition: `${cam.x}px ${cam.y}px`, '--micro-opacity': cam.zoom >= .65 ? '1' : '0' }}
-    onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}
-    onDragOver={e => { if (!locked && e.dataTransfer?.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } }}
-    onDrop={e => { if (locked) return; e.preventDefault(); void addImages([...(e.dataTransfer?.files ?? [])], world({ x: e.clientX, y: e.clientY })); }}
+    onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} onPointerLeave={() => onCursor?.(null)}
+    onDragOver={e => { if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = !locked && writable ? 'copy' : 'none'; } }}
+    onDrop={e => { e.preventDefault(); if (locked || !writable) return; void addImages([...(e.dataTransfer?.files ?? [])], world({ x: e.clientX, y: e.clientY })); }}
     onDblClick={e => { if ((mode === 'select' || mode === 'group') && !e.composedPath().some(target => target instanceof Element && target.matches('[data-note], .floating, .connections, .group-label'))) add(local({ x: e.clientX, y: e.clientY })); }}>
     <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif" multiple hidden onChange={e => void addImages([...(e.currentTarget.files ?? [])])} />
     <div className={`world ${cameraFocusing ? 'camera-focusing' : ''}`} style={{ transform: `translate(${cam.x}px, ${cam.y}px) scale(${cam.zoom})` }}>
-      {groupRects.map(group => <section key={group.id} data-group={group.id} className={`group-frame ${selectedGroup === group.id ? 'selected' : ''} ${draft?.target === group.id ? 'connection-target' : ''}`} style={{ left: group.x, top: group.y, width: group.width, height: group.height }}>
-        <div className="group-label" onDblClick={e => { e.stopPropagation(); if (mode !== 'connect' && !hand) { editGroup(group.id); requestAnimationFrame(() => root.current?.querySelector<HTMLInputElement>(`[data-group="${group.id}"] input`)?.focus({ preventScroll: true })); } }}>
-          {editingGroup === group.id ? <input aria-label="Название группы" maxLength={240} value={group.title} onInput={e => update({ ...current.current, groups: current.current.groups.map(g => g.id === group.id ? { ...g, title: e.currentTarget.value } : g) })} onBlur={() => editGroup(null)} onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') editGroup(null); }} /> : <span>{group.title || 'Группа'}</span>}
-          {selectedGroup === group.id && <Button icon="close" label="Разгруппировать" onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={() => ungroup(group.id)} />}
+      {visibleGroups.map(group => <section key={group.id} data-group={group.id} className={`group-frame ${selectedGroup === group.id ? 'selected' : ''} ${draft?.target === group.id ? 'connection-target' : ''}`} style={{ left: group.x, top: group.y, width: group.width, height: group.height }}>
+        <div className="group-label" onDblClick={e => { e.stopPropagation(); if (canGroup(group.noteIds) && mode !== 'connect' && !hand) { editGroup(group.id); requestAnimationFrame(() => root.current?.querySelector<HTMLInputElement>(`[data-group="${group.id}"] input`)?.focus({ preventScroll: true })); } }}>
+          {editingGroup === group.id && canGroup(group.noteIds) ? <input aria-label="Название группы" maxLength={240} value={group.title} onInput={e => update({ ...current.current, groups: current.current.groups.map(g => g.id === group.id ? { ...g, title: e.currentTarget.value } : g) })} onBlur={() => editGroup(null)} onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') editGroup(null); }} /> : <span>{group.title || 'Группа'}</span>}
+          {selectedGroup === group.id && canGroup(group.noteIds) && <Button icon="close" label="Разгруппировать" onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={() => ungroup(group.id)} />}
         </div>
       </section>)}
-      <Connections edges={routed} draft={draftPath} selected={selectedEdge} editing={editingEdge}
+      <Connections edges={routed} draft={writable ? draftPath : undefined} selected={selectedEdge} editing={writable ? editingEdge : null} readOnly={!writable}
         toggleStyle={id => update({ ...current.current, connections: current.current.connections.map(edge => edge.id === id ? { ...edge, style: edge.style === 'dashed' ? 'solid' : 'dashed' } : edge) })}
-        select={id => { selectEdge(id); select(null); setEditing(null); }} edit={editEdge} remove={removeEdge}
+        select={id => { selectEdge(id); select(null); setEditing(null); }} edit={id => { if (access.current !== 'viewer') editEdge(id); }} remove={removeEdge}
         change={(id, label) => update({ ...current.current, connections: current.current.connections.map(edge => edge.id === id ? { ...edge, label } : edge) })} />
-      {board.notes.map(note => <article key={note.id} data-note={note.id} className={`note pigment-${note.color} ${note.pinned ? 'pinned-note' : ''} ${note.kind === 'image' ? 'image-note' : ''} ${note.sealed ? 'sealed-note' : ''} ${selectedIds.includes(note.id) ? 'multi-selected' : ''} ${selected === note.id ? 'selected' : ''} ${draft?.target === note.id ? 'connection-target' : ''} ${draft?.source === note.id ? 'connection-source' : ''}`} style={{ transform: `translate(${note.x}px, ${note.y}px)`, width: note.width, height: note.height }} onFocusIn={() => select(note.id)}>
+      {visibleNotes.map(note => <article key={note.id} data-note={note.id} className={`note pigment-${note.color} ${remoteSelections.has(note.id) ? 'remote-selected' : ''} ${note.pinned ? 'pinned-note' : ''} ${note.kind === 'image' ? 'image-note' : ''} ${note.sealed ? 'sealed-note' : ''} ${selectedSet.has(note.id) ? 'multi-selected' : ''} ${selected === note.id ? 'selected' : ''} ${draft?.target === note.id ? 'connection-target' : ''} ${draft?.source === note.id ? 'connection-source' : ''}`} style={{ transform: `translate(${note.x}px, ${note.y}px)`, width: note.width, height: note.height, '--peer-color': remoteSelections.get(note.id)?.color }} onFocusIn={() => select(note.id)}>
         <div className="note-handle" aria-label="Заголовок заметки">
-          {editing?.id === note.id && editing.field === 'title' ? <input className="note-title" aria-label="Название заметки" value={note.title} maxLength={240} readOnly={noteBusy === note.id} onInput={e => patch(note.id, { title: e.currentTarget.value })} onBlur={() => setEditing(null)} onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') { e.stopPropagation(); setEditing(null); } }} /> : <span className="note-title" onDblClick={e => { e.stopPropagation(); startEditing(note.id, 'title'); }}>{note.title || 'Заметка'}</span>}
+          {canEdit(note) && editing?.id === note.id && editing.field === 'title' ? <input className="note-title" aria-label="Название заметки" value={note.title} maxLength={240} readOnly={noteBusy === note.id} onInput={e => patch(note.id, { title: e.currentTarget.value })} onBlur={() => setEditing(null)} onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') { e.stopPropagation(); setEditing(null); } }} /> : <span className="note-title" onDblClick={e => { e.stopPropagation(); startEditing(note.id, 'title'); }}>{note.title || 'Заметка'}</span>}
           <span className="grip"><Icon name="grip" size={16} /></span>
         </div>
         {note.sealed ? <div className="sealed-cover">
           <div className="sealed-placeholder" aria-hidden="true"><i /><i /><i /><i /><i /></div>
-          <Button className="unseal-button" icon={noteBusy === note.id ? undefined : 'lock'} label="Разблокировать заметку" disabled={Boolean(noteBusy) || clipboardWorking} onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={() => void onToggleLock(note.id)}>{noteBusy === note.id && <span className="spinner" />}</Button>
+          <Button className="unseal-button" icon={noteBusy === note.id ? undefined : 'lock'} label="Разблокировать заметку" disabled={role !== 'owner' || Boolean(noteBusy) || clipboardWorking} onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={() => { if (access.current === 'owner') void onToggleLock(note.id); }}>{noteBusy === note.id && <span className="spinner" />}</Button>
         </div> : <>
-        {note.kind === 'image' ? <div className="note-image"><img src={note.image} alt={note.title} draggable={false} /></div> : <NoteBody note={note} notes={noteCatalog} editing={editing?.id === note.id && editing.field === 'text'} busy={noteBusy === note.id} change={text => patch(note.id, { text })} edit={() => startEditing(note.id, 'text')} done={() => setEditing(null)} follow={focusNote} />}
+        {note.kind === 'image' ? <div className="note-image"><img src={note.image} alt={note.title} draggable={false} /></div> : <NoteBody note={note} notes={noteCatalog} editing={canEdit(note) && editing?.id === note.id && editing.field === 'text'} busy={noteBusy === note.id} change={text => patch(note.id, { text })} edit={() => startEditing(note.id, 'text')} done={() => setEditing(null)} follow={focusNote} />}
         {note.kind === 'text' && <div className="note-footer"><span>{note.text.length ? `${note.text.length.toLocaleString('ru')} зн.` : ''}</span></div>}
         </>}
         <div className="note-tools" aria-label="Параметры заметки">
-          {note.kind === 'text' && !note.sealed && <div className="swatches">{colors.map(color => <button type="button" className={`swatch pigment-${color}`} aria-label={labels[color]} title={labels[color]} disabled={noteBusy === note.id} aria-pressed={note.color === color} onClick={() => patch(note.id, { color })}>{note.color === color && <Icon name="check" size={12} />}</button>)}</div>}
-          {!note.sealed && <Button icon="lock" label="Заблокировать заметку" disabled={Boolean(noteBusy) || clipboardWorking} onClick={() => { setEditing(null); setLastDeleted(null); gesture.current = null; void onToggleLock(note.id); }} />}
-          <Button icon={note.pinned ? 'unpin' : 'pin'} label={note.pinned ? 'Снять фиксацию заметки' : 'Зафиксировать заметку'} aria-pressed={Boolean(note.pinned)} className={note.pinned ? 'pin-active' : ''} disabled={noteBusy === note.id} onClick={() => { gesture.current = null; patch(note.id, { pinned: !note.pinned }); }} />
-          <Button icon="trash" label="Удалить заметку" className="delete-note" disabled={noteBusy === note.id} onClick={() => remove(note.id)} />
+          {note.kind === 'text' && !note.sealed && <div className="swatches">{colors.map(color => <button type="button" className={`swatch pigment-${color}`} aria-label={labels[color]} data-tooltip={labels[color]} disabled={!canEdit(note) || noteBusy === note.id} aria-pressed={note.color === color} onClick={() => patch(note.id, { color })}>{note.color === color && <Icon name="check" size={12} />}</button>)}</div>}
+          {!note.sealed && <Button icon="lock" label="Заблокировать заметку" disabled={role !== 'owner' || Boolean(noteBusy) || clipboardWorking} onClick={() => { if (access.current !== 'owner') return; setEditing(null); setLastDeleted(null); gesture.current = null; void onToggleLock(note.id); }} />}
+          <Button icon={note.pinned ? 'unpin' : 'pin'} label={note.pinned ? 'Снять фиксацию заметки' : 'Зафиксировать заметку'} aria-pressed={Boolean(note.pinned)} className={note.pinned ? 'pin-active' : ''} disabled={role !== 'owner' || noteBusy === note.id} onClick={() => { if (access.current !== 'owner') return; gesture.current = null; patch(note.id, { pinned: !note.pinned }); }} />
+          <Button icon="trash" label="Удалить заметку" className="delete-note" disabled={!canEdit(note) || noteBusy === note.id} onClick={() => remove(note.id)} />
         </div>
-        {!note.pinned && (mode === 'select' || mode === 'group') && ['n', 'e', 's', 'w', 'ne', 'se', 'sw', 'nw'].map(edge => <span className={`resize-handle resize-${edge}`} data-resize={edge} aria-hidden="true" />)}
+        {canMove(note) && (mode === 'select' || mode === 'group') && ['n', 'e', 's', 'w', 'ne', 'se', 'sw', 'nw'].map(edge => <span className={`resize-handle resize-${edge}`} data-resize={edge} aria-hidden="true" />)}
       </article>)}
+      {visibleNotes.map(note => {
+        const remote = remoteSelections.get(note.id);
+        return remote && <span key={note.id} className="board-remote-selection-label" aria-label={`Выбрали: ${remote.uids.map(uid => uid.slice(0, 8)).join(', ')}`} style={{ left: note.x, top: note.y, '--peer-color': remote.color }}>{remote.label}</span>;
+      })}
     </div>
+    {peers.length > 0 && <div className="board-peer-cursors" aria-hidden="true">
+      {peers.filter(peer => Number.isFinite(peer.x) && Number.isFinite(peer.y)).map(peer => <div key={peer.id} className="board-peer-cursor" style={{ transform: `translate(${peer.x * cam.zoom + cam.x}px, ${peer.y * cam.zoom + cam.y}px)`, '--peer-color': peerColor(peer.uid) }}>
+        <Icon name="cursor" size={20} /><span>{peer.uid.length > 10 ? `${peer.uid.slice(0, 8)}…` : peer.uid} · {peer.role}</span>
+      </div>)}
+    </div>}
     {selectionRect && <div className="selection-rect" aria-hidden="true" style={{ left: selectionRect.x * cam.zoom + cam.x, top: selectionRect.y * cam.zoom + cam.y, width: selectionRect.width * cam.zoom, height: selectionRect.height * cam.zoom }} />}
     {!locked && <>
       <div className="board-bottom">
         <div className="toolbar floating" role="toolbar" aria-label="Инструменты доски">
           <Button icon="cursor" label="Выбирать и перемещать заметки" className={mode === 'select' ? 'active' : ''} aria-pressed={mode === 'select'} onClick={() => chooseMode('select')} />
           <Button icon="hand" label="Перемещать доску" className={hand ? 'active' : ''} aria-pressed={hand} onClick={() => chooseMode('hand')} />
-          <Button icon="connect" label="Создавать связи" className={mode === 'connect' ? 'active' : ''} aria-pressed={mode === 'connect'} onClick={() => chooseMode('connect')} />
-          <Button icon="group" label="Сгруппировать выделенные заметки (G)" className={mode === 'group' ? 'active' : ''} aria-pressed={mode === 'group'} disabled={selectedIds.length < 2} onClick={makeGroup} />
+          <Button icon="connect" label="Создавать связи" className={mode === 'connect' ? 'active' : ''} aria-pressed={mode === 'connect'} disabled={!writable} onClick={() => chooseMode('connect')} />
+          <Button icon="group" label="Сгруппировать выделенные заметки (G)" className={mode === 'group' ? 'active' : ''} aria-pressed={mode === 'group'} disabled={selectedIds.length < 2 || !canGroup(selectedIds)} onClick={makeGroup} />
           <span className="tool-divider" />
-          <Button icon="plus" label="Добавить заметку (N)" className="add-note" onClick={() => add()}><span>Заметка</span></Button>
-          <Button icon="image" label="Добавить картинку" disabled={imageBusy} onClick={() => imageInput.current?.click()} />
+          <Button icon="plus" label="Добавить заметку (N)" className="add-note" disabled={!writable} onClick={() => add()}><span>Заметка</span></Button>
+          <Button icon="image" label="Добавить картинку" disabled={!writable || imageBusy} onClick={() => imageInput.current?.click()} />
           <Button icon="search" label="Поиск (Ctrl/⌘ F)" className={searchOpen ? 'active' : ''} aria-expanded={searchOpen} onClick={openSearch} />
           <span className="tool-divider" />
           <Button icon="minus" label="Уменьшить масштаб" onClick={() => zoomTo(cam.zoom / 1.2)} disabled={cam.zoom <= .15} />
@@ -489,15 +652,16 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
         <div className="toolbar floating board-actions" role="toolbar" aria-label="Сохранение и доступ">{actions}</div>
       </div>
       {searchOpen && <SearchPopover query={searchQuery} count={searchMatches.length} index={Math.min(searchIndex, Math.max(0, searchMatches.length - 1))} change={value => { setSearchQuery(value); setSearchIndex(0); }} step={stepSearch} close={closeSearch} />}
-      {lastDeleted && <UndoToast key={lastDeleted.note.id} dismiss={() => setLastDeleted(null)} undo={() => {
-        if (current.current.notes.length >= 1000) { setNotice('На доске уже 1000 заметок.'); return; }
+      {lastDeleted && canEdit(lastDeleted.note) && <UndoToast key={lastDeleted.note.id} dismiss={() => setLastDeleted(null)} undo={() => {
+        if (!canEdit(lastDeleted.note) || current.current.notes.some(note => note.id === lastDeleted.note.id)) return;
+        if (current.current.notes.length >= 10000) { setNotice('На доске уже 10000 заметок.'); return; }
         const notes = [...current.current.notes, lastDeleted.note];
         let groups = current.current.groups;
         if (lastDeleted.group) {
           const previous = lastDeleted.group;
           groups = groups.some(g => g.id === previous.id) ? groups.map(g => g.id === previous.id ? { ...g, noteIds: [...g.noteIds, lastDeleted.note.id] } : g) : [...groups, { ...previous, noteIds: [lastDeleted.note.id] }];
         }
-        update(cleanGroups({ ...current.current, notes, groups, connections: [...current.current.connections, ...lastDeleted.connections].slice(0, 4000) })); setLastDeleted(null);
+        update(cleanGroups({ ...current.current, notes, groups, connections: [...current.current.connections, ...lastDeleted.connections].slice(0, 40000) })); setLastDeleted(null);
       }} />}
       {notice && <div className="undo-toast floating" role="alert">{notice}<Button icon="close" label="Закрыть уведомление" onClick={() => setNotice('')} /></div>}
     </>}

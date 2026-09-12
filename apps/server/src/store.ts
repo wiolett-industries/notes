@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { imageFiles } from './image-files.js';
+import { createCollaborationStore } from './collaboration-store.js';
 import type { WebAuthnCredential } from '@simplewebauthn/server';
 import { MAX_ENCRYPTED_BYTES, MAX_ENTITIES, type Envelope, type DeltaWrite, type InitialEntities, type Vault, type EntityWrite } from '@quiet/shared';
 
@@ -61,11 +62,13 @@ export function openStore(path: string, imagesPath = process.env.IMAGES_PATH ?? 
     db.exec('ALTER TABLE board_entities ADD COLUMN file_name TEXT');
   }
   const files = imageFiles(imagesPath);
+  const collaboration = createCollaborationStore(db, files);
   // Serialize recovery with writers, including other processes sharing this DB.
   db.exec('BEGIN IMMEDIATE');
   try {
     const references = db.prepare('SELECT file_name FROM board_entities WHERE file_name IS NOT NULL').all() as { file_name: string }[];
-    files.sweep(new Set(references.map(row => row.file_name)));
+    files.sweep(new Set([...references.map(row => row.file_name), ...collaboration.fileReferences()]));
+    files.sweepSnapshots(new Set(collaboration.publicReferences()));
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); db.close(); throw error; }
   let createdFiles: string[] = [], obsoleteFiles: string[] = [];
@@ -95,6 +98,7 @@ export function openStore(path: string, imagesPath = process.env.IMAGES_PATH ?? 
   }
   return {
     db,
+    collaboration,
     cleanup(now: number) {
       db.prepare('DELETE FROM ceremonies WHERE expires <= ?').run(now);
       db.prepare('DELETE FROM sessions WHERE expires <= ?').run(now);

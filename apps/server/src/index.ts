@@ -4,8 +4,10 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { existsSync } from 'node:fs';
+import type { Server } from 'node:http';
 import { openStore } from './store.js';
 import { createApp } from './app.js';
+import { attachCollaboration } from './collaboration-socket.js';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const production = process.env.NODE_ENV === 'production';
@@ -20,6 +22,7 @@ app.get('/assets/*', serveStatic({ root: frontend, onFound: (_path, c) => { c.he
 app.get('/favicon.svg', serveStatic({ path: resolve(frontend, 'favicon.svg') }));
 app.get('/', serveStatic({ path: resolve(frontend, 'index.html'), onFound: (_path, c) => { c.header('Cache-Control', 'no-cache'); } }));
 const server = serve({ fetch: app.fetch, port: Number(process.env.PORT ?? 3001), hostname: process.env.HOST ?? '127.0.0.1' }, info => console.log(`notes listening on port ${info.port}`));
-function close() { server.close(() => { store.close(); process.exit(0); }); }
+const closeCollaboration = attachCollaboration(server as Server, store, origin);
+function close() { closeCollaboration(); server.close(() => { store.close(); process.exit(0); }); }
 process.on('SIGTERM', close);
 process.on('SIGINT', close);

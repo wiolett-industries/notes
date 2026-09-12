@@ -10,6 +10,8 @@
   --muted-heading: #92988a;
   --line: #dedfd6;
   --hover: #e9eae3;
+  --control: #eeeee7;
+  --tool-control: #39413a;
   --primary: #354638;
   --primary-hover: #435647;
   --on-primary: #f2f4eb;
@@ -50,6 +52,8 @@
     --muted-heading: #919b89;
     --line: #3b403b;
     --hover: #363c36;
+    --control: #30352f;
+    --tool-control: #343d33;
     --primary: #cfddba;
     --primary-hover: #e0eccd;
     --on-primary: #273223;

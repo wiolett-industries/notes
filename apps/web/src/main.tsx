@@ -13,6 +13,10 @@ import { sealNote } from './note-lock';
 import { KeyDialog } from './KeyDialog';
 import { openWithKey, unlockWithKey, prepareLocksWithKey } from './key-auth';
 import { rememberSession, restoreSession, forgetSession, refreshSessionOnActivity } from './session';
+import { Workspace } from './Workspace';
+import { PublicBoard } from './PublicBoard';
+import { Modal } from './Modal';
+import { Tooltip } from './Tooltip';
 import './style.css';
 
 const backupSchema = z.object({ format: z.literal('quiet-backup'), accountId: base64url.length(43), revision: z.number().int().positive(), envelope: envelopeSchema }).strict();
@@ -171,10 +175,10 @@ function App() {
     finally { setBusy(false); }
   }
   return <main>
-    {unlocked ? <Board key={unlocked.accountId} board={board} onChange={change} noteBusy={noteBusy} onToggleLock={toggleNoteLock}
-      clipboardKey={unlocked.key} accountId={unlocked.accountId} interactionBlocked={lockDialog || reloadDialog || Boolean(keyDialog)}
-      actions={<><Button icon="download" label="Скачать зашифрованную копию" disabled={Boolean(noteBusy)} onClick={download} /><Button icon="upload" label="Открыть зашифрованную копию" disabled={Boolean(noteBusy)} onClick={() => fileInput.current?.click()} /><Button icon="lock" label="Выйти" disabled={busy || Boolean(noteBusy)} onClick={() => void lock()} /></>}
-    /> : <div className="login-screen">
+    {unlocked ? <Workspace account={unlocked} initialBoard={board} logout={() => lock()} migrated={async () => {
+      change({ ...emptyBoard(), lockKeys: board.lockKeys });
+      if (!(await sync.current!.flush())) throw new Error('Не удалось завершить перенос старой доски.');
+    }} /> : <div className="login-screen">
       <Button className="primary login-button" onClick={() => void auth()} disabled={busy} aria-busy={busy}>
         {busy ? <span className="spinner" aria-label="Загрузка доски" role="status" /> : 'Войти с passkey'}
       </Button>
@@ -192,7 +196,13 @@ function App() {
     }} />}
     <input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={e => void importBackup(e.currentTarget.files?.[0])} />
     {unlocked && error && <div className="error-banner" role="alert"><div><strong>{syncState === 'conflict' ? 'Конфликт версий' : 'Не удалось сохранить'}</strong><p>{error}</p></div><div className="error-actions">{syncState !== 'conflict' && <Button icon="retry" onClick={() => void sync.current?.flush()}>Повторить</Button>}<Button icon="download" onClick={download}>Скачать копию</Button>{syncState === 'conflict' && <Button onClick={() => setReloadDialog(true)}>Загрузить с сервера</Button>}</div></div>}
-    {(lockDialog || reloadDialog) && <div className="modal-backdrop"><section className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><Icon name="lock" size={28} /><h2 id="dialog-title">Сначала сохрани свою версию.</h2><p>{lockDialog ? 'На сервер ушли не все изменения. Скачай зашифрованную копию или вернись к доске.' : 'Загрузка с сервера заменит локальные изменения. Сначала можно скачать зашифрованную копию.'}</p><p className="muted">Копия открывается только с тем же passkey.</p><Button className="primary" icon="download" onClick={download}>{backupReady ? 'Скачать копию ещё раз' : 'Скачать копию'}</Button><Button className="secondary" disabled={busy} onClick={() => lockDialog ? void lock(true) : void reload()}>{lockDialog ? 'Заблокировать и убрать локальные изменения' : 'Заменить локальную версию'}</Button><Button className="text-button" onClick={() => { setLockDialog(false); setReloadDialog(false); }}>Вернуться к доске</Button></section></div>}
+    <Modal open={lockDialog || reloadDialog} close={() => { if (!busy) { setLockDialog(false); setReloadDialog(false); } }} label="Сохранить локальную версию"><Icon name="lock" size={28} /><h2>Сначала сохрани свою версию.</h2><p>{lockDialog ? 'На сервер ушли не все изменения. Скачай зашифрованную копию или вернись к доске.' : 'Загрузка с сервера заменит локальные изменения. Сначала можно скачать зашифрованную копию.'}</p><p className="muted">Копия открывается только исходным ключом этой доски.</p><Button className="primary" icon="download" onClick={download}>{backupReady ? 'Скачать копию ещё раз' : 'Скачать копию'}</Button><Button className="secondary" disabled={busy} onClick={() => lockDialog ? void lock(true) : void reload()}>{lockDialog ? 'Выйти без сохранения' : 'Заменить локальную версию'}</Button><Button className="text-button" onClick={() => { setLockDialog(false); setReloadDialog(false); }}>Вернуться к доске</Button></Modal>
   </main>;
 }
-render(<App />, document.getElementById('app')!);
+function Root() {
+  const read = () => new URLSearchParams(location.hash.slice(1)).get('public');
+  const [publicToken, setPublicToken] = useState(read);
+  useEffect(() => { const changed = () => setPublicToken(read()); window.addEventListener('hashchange', changed); return () => window.removeEventListener('hashchange', changed); }, []);
+  return <><Tooltip />{publicToken ? <PublicBoard key={publicToken} token={publicToken} /> : <App />}</>;
+}
+render(<Root />, document.getElementById('app')!);

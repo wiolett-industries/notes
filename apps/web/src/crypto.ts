@@ -21,7 +21,7 @@ function aad(accountId: string, revision: number) {
 }
 export async function encryptBoard(key: CryptoKey, accountId: string, revision: number, board: BoardData): Promise<Envelope> {
   const plaintext = encoder.encode(JSON.stringify(boardSchema.parse(board)));
-  if (plaintext.byteLength > MAX_BOARD_BYTES) { plaintext.fill(0); throw new Error('Доска превышает 23 МБ. Удалите часть изображений.'); }
+  if (plaintext.byteLength > MAX_BOARD_BYTES) { plaintext.fill(0); throw new Error('Доска превышает 92 МБ. Удалите часть изображений.'); }
   const iv = crypto.getRandomValues(new Uint8Array(12));
   try {
     const result = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(accountId, revision), tagLength: 128 }, key, plaintext);

@@ -21,6 +21,7 @@
     "@playwright/test": "^1.63.0",
     "@preact/preset-vite": "^2.10.6",
     "@types/node": "^22.20.2",
+    "@types/ws": "^8.18.1",
     "cbor-x": "^1.6.6",
     "esbuild": "^0.28.2",
     "tsx": "^4.23.13",

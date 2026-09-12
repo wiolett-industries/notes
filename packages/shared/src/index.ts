@@ -1,8 +1,8 @@
 import { z } from 'zod';
 
-export const MAX_ENCRYPTED_BYTES = 32_000_000;
+export const MAX_ENCRYPTED_BYTES = 128_000_000;
 export const SESSION_SECONDS = 12 * 60 * 60;
-export const MAX_BOARD_BYTES = 23_000_000;
+export const MAX_BOARD_BYTES = 92_000_000;
 export const GRID_SIZE = 8;
 export const PRF_INPUT = 'quiet/board/passkey-prf/v1';
 export const colors = ['sand', 'sage', 'rose', 'lavender', 'sky'] as const;
@@ -40,9 +40,9 @@ export const groupSchema = z.object({
 }).strict();
 export const boardSchema = z.object({
   version: z.literal(1),
-  notes: z.array(noteSchema).max(1000),
-  connections: z.array(connectionSchema).max(4000).default([]),
-  groups: z.array(groupSchema).max(500).default([]),
+  notes: z.array(noteSchema).max(10_000),
+  connections: z.array(connectionSchema).max(40_000).default([]),
+  groups: z.array(groupSchema).max(5000).default([]),
   lockKeys: lockKeysSchema.optional(),
   camera: z.object({ x: coordinate, y: coordinate, zoom: z.number().min(0.15).max(3) }).strict(),
 }).strict().refine(board => {
@@ -62,11 +62,16 @@ export const saveSchema = z.object({
   revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1),
   envelope: envelopeSchema,
 }).strict();
-export const MAX_ENTITIES = 7503;
+export const MAX_ENTITIES = 75003;
+export const entityAccessSchema = z.object({
+  address: z.string().regex(/^(?:meta|camera|lockKeys|(?:note-content|note-layout|note-image|group|connection):[0-9a-f-]{36})$/),
+  pinned: z.boolean().optional(), sealed: z.boolean().optional(),
+}).strict();
 export const encryptedEntitySchema = z.object({
   id: base64url.length(43),
   revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1),
   envelope: envelopeSchema,
+  access: entityAccessSchema.optional(),
 }).strict();
 export const entityWriteSchema = encryptedEntitySchema.omit({ revision: true }).extend({ storage: z.literal('file').optional() });
 export const manifestSchema = envelopeSchema.extend({ ciphertext: base64url.min(22).max(4096) });
@@ -87,6 +92,11 @@ export const initialEntitiesSchema = z.object({
 }).strict().refine(value => new Set(value.entities.map(e => e.id)).size === value.entities.length);
 export const keyAuthSchema = z.object({ accountId: base64url.length(43), authToken: base64url.length(43) }).strict();
 export const keyRegistrationSchema = keyAuthSchema.extend({ snapshot: initialEntitiesSchema });
+export type BoardRole = 'owner' | 'editor' | 'viewer';
+export type BoardEntry = { id: string; ownerId: string; role: BoardRole; name: Envelope; wrappedKey: string; publicToken?: string | null };
+export type AccountIdentity = { publicKey: string; privateKey: Envelope; initialized?: boolean };
+export const publicSnapshotSchema = z.object({ name: z.string().min(1).max(120), board: boardSchema, lockedIds: z.array(z.string().uuid()).max(10_000) }).strict().refine(value => !value.board.lockKeys && value.board.notes.every(note => !note.sealed), 'Public snapshots must not contain private keys or sealed payloads');
+export type PublicSnapshot = z.infer<typeof publicSnapshotSchema>;
 export type BoardData = z.infer<typeof boardSchema>;
 export type NoteData = z.infer<typeof noteSchema>;
 export type ConnectionData = z.infer<typeof connectionSchema>;
@@ -104,3 +114,4 @@ export type InitialEntities = z.infer<typeof initialEntitiesSchema>;
 export type EntityVault = { accountId: string; format: 2; revision: number; manifest: Envelope; entities: EncryptedEntity[] };
 export type Vault = LegacyVault | EntityVault;
 export const emptyBoard = (): BoardData => ({ version: 1, notes: [], connections: [], groups: [], camera: { x: 0, y: 0, zoom: 1 } });
+export * from './transfer.ts';

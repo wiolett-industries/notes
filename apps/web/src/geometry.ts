@@ -29,7 +29,7 @@ function curve(start: Port, end: Port) {
 }
 // Incoming and outgoing arrows share the same side's slots. Sort by their
 // opposite endpoint so a fan of arrows keeps its order as notes move.
-export function routeConnections(notes: Endpoint[], edges: (ConnectionData & { mention?: boolean })[]) {
+export function prepareConnectionRouting(notes: Endpoint[], edges: (ConnectionData & { mention?: boolean })[]) {
   const byId = new Map(notes.map(note => [note.id, note]));
   const groups = new Map<string, { key: string; order: number }[]>();
   const entries = edges.flatMap(edge => {
@@ -50,7 +50,23 @@ export function routeConnections(notes: Endpoint[], edges: (ConnectionData & { m
     group.sort((a, b) => a.order - b.order || a.key.localeCompare(b.key));
     group.forEach((entry, index) => slots.set(entry.key, (index + 1) / (group.length + 1)));
   }
-  return entries.map(({ edge, source, target, from, to }) => ({ ...edge, labelText: edge.label, ...curve(port(source, from, slots.get(`${edge.id}:s`)), port(target, to, slots.get(`${edge.id}:t`))) }));
+  return entries.map(({ edge, source, target, from, to }) => {
+    const start = port(source, from, slots.get(`${edge.id}:s`)), end = port(target, to, slots.get(`${edge.id}:t`));
+    // A cubic stays inside its control-point hull; handles extend at most 240
+    // world pixels. The union also retains links crossing the viewport with
+    // both endpoints offscreen.
+    const bounds = { x: Math.min(source.x, target.x) - 240, y: Math.min(source.y, target.y) - 240,
+      width: Math.max(source.x + source.width, target.x + target.width) - Math.min(source.x, target.x) + 480,
+      height: Math.max(source.y + source.height, target.y + target.height) - Math.min(source.y, target.y) + 480 };
+    return { edge, start, end, bounds };
+  });
+}
+export function routePreparedConnections(entries: ReturnType<typeof prepareConnectionRouting>, viewport?: Rect, retained: ReadonlySet<string> = new Set()) {
+  return entries.filter(entry => !viewport || retained.has(entry.edge.id) || intersects(entry.bounds, viewport))
+    .map(({ edge, start, end }) => ({ ...edge, labelText: edge.label, ...curve(start, end) }));
+}
+export function routeConnections(notes: Endpoint[], edges: (ConnectionData & { mention?: boolean })[], viewport?: Rect) {
+  return routePreparedConnections(prepareConnectionRouting(notes, edges), viewport);
 }
 export function draftConnection(source: Endpoint, point: Point, target?: Endpoint) {
   const destination = target ?? { ...source, x: point.x, y: point.y, width: 0, height: 0 };
