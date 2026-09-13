@@ -422,19 +422,30 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
   }
   useEffect(() => {
     const el = root.current!;
+    let owner: HTMLElement | null = null, lastWheel = -Infinity;
     function wheel(e: WheelEvent) {
       const target = e.target as HTMLElement;
-      if (locked || target.closest('textarea, input, .floating, .note-tools, dialog')) return;
-      if (!e.ctrlKey && !e.metaKey) {
-        const content = target.closest<HTMLElement>('.note-content');
-        const nested = target.closest<HTMLElement>('.note-content pre, .note-content table');
-        // Rendered Markdown owns wheel input just like the textarea. Keep it
-        // inside the note at scroll boundaries instead of moving the canvas.
-        if ([nested, content].some(element => element && (element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth))) return;
+      if (locked || target.closest('input, .floating, .note-tools, dialog')) return;
+      const now = performance.now();
+      if (e.ctrlKey || e.metaKey) {
+        lastWheel = -Infinity; owner = null; e.preventDefault();
+        zoomTo(current.current.camera.zoom * Math.exp(-e.deltaY * .008), local({ x: e.clientX, y: e.clientY }));
+        return;
       }
+      // A wheel burst belongs to its starting surface, including inertial events.
+      if (now - lastWheel > 220) {
+        const candidates = [target.closest<HTMLElement>('.note-content pre, .note-content table'), target.closest<HTMLElement>('.note-content, .note textarea')];
+        owner = candidates.find(element => element && (element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth)) ?? null;
+      }
+      lastWheel = now;
       e.preventDefault();
-      if (e.ctrlKey || e.metaKey) zoomTo(current.current.camera.zoom * Math.exp(-e.deltaY * .008), local({ x: e.clientX, y: e.clientY }));
-      else { const old = current.current.camera; const factor = e.deltaMode === 1 ? 16 : 1; camera({ ...old, x: old.x - e.deltaX * factor, y: old.y - e.deltaY * factor }); }
+      const factor = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1;
+      if (owner) {
+        if (owner.isConnected) { owner.scrollLeft += e.deltaX * factor; owner.scrollTop += e.deltaY * factor; }
+      } else {
+        const old = current.current.camera;
+        camera({ ...old, x: old.x - e.deltaX * factor, y: old.y - e.deltaY * factor });
+      }
     }
     el.addEventListener('wheel', wheel, { passive: false });
     return () => el.removeEventListener('wheel', wheel);
@@ -685,12 +696,15 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
   const moving = gesture.current;
   const guideTarget = dragging && (moving?.kind === 'note' || moving?.kind === 'group')
     ? moving.group ? groupRects.find(group => group.id === moving.group) : visualNotes.find(note => note.id === moving.note?.id) : undefined;
-  const guides: GuideLine[] = guideTarget ? alignmentGuides(guideTarget, visualNotes, new Set(moving?.moved?.map(note => note.id)), cam.zoom) : [];
+  const guides: (GuideLine & { axisEnd?: 'start' | 'end' })[] = guideTarget ? alignmentGuides(guideTarget, visualNotes, new Set(moving?.moved?.map(note => note.id)), cam.zoom) : [];
   if (guideTarget && axis) {
-    const extension = 100 / cam.zoom, middle = center(guideTarget);
-    guides.unshift(axis === 'x'
-      ? { x1: guideTarget.x - extension, y1: middle.y, x2: guideTarget.x + guideTarget.width + extension, y2: middle.y }
-      : { x1: middle.x, y1: guideTarget.y - extension, x2: middle.x, y2: guideTarget.y + guideTarget.height + extension });
+    const extension = 300 / cam.zoom, middle = center(guideTarget);
+    if (axis === 'x') guides.unshift(
+      { x1: guideTarget.x - extension, y1: middle.y, x2: guideTarget.x, y2: middle.y, axisEnd: 'start' },
+      { x1: guideTarget.x + guideTarget.width, y1: middle.y, x2: guideTarget.x + guideTarget.width + extension, y2: middle.y, axisEnd: 'end' });
+    else guides.unshift(
+      { x1: middle.x, y1: guideTarget.y - extension, x2: middle.x, y2: guideTarget.y, axisEnd: 'start' },
+      { x1: middle.x, y1: guideTarget.y + guideTarget.height, x2: middle.x, y2: guideTarget.y + guideTarget.height + extension, axisEnd: 'end' });
   }
   const visibleGroups = groupRects.filter(group => group.id === selectedGroup || group.id === editingGroup || group.id === gesture.current?.group || intersects(group, viewport));
   const connectionEndpoints = useMemo(() => [...groupRects, ...visualNotes], [groupRects, visualNotes]);
@@ -708,12 +722,27 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
     <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif" multiple hidden onChange={e => void addImages([...(e.currentTarget.files ?? [])])} />
     <div className={`world ${cameraFocusing ? 'camera-focusing' : ''}`} style={{ transform: `translate(${cam.x}px, ${cam.y}px) scale(${cam.zoom})` }}>
       {guides.length > 0 && <svg className="drag-guides" width="1" height="1" aria-hidden="true">
-        {guides.map((line, index) => {
+        {guides.flatMap(line => {
+          if (!guideTarget) return [line];
+          const { x, y, width, height } = guideTarget;
+          if (line.y1 === line.y2 && line.y1 >= y && line.y1 <= y + height) return [
+            ...(line.x1 < x ? [{ ...line, x2: Math.min(line.x2, x) }] : []),
+            ...(line.x2 > x + width ? [{ ...line, x1: Math.max(line.x1, x + width) }] : []),
+          ];
+          if (line.x1 === line.x2 && line.x1 >= x && line.x1 <= x + width) return [
+            ...(line.y1 < y ? [{ ...line, y2: Math.min(line.y2, y) }] : []),
+            ...(line.y2 > y + height ? [{ ...line, y1: Math.max(line.y1, y + height) }] : []),
+          ];
+          return [line];
+        }).map((line, index) => {
+          const { axisEnd, ...points } = line;
           const id = `${guideId}-${index}`, fade = Math.min(.45, 100 / cam.zoom / Math.hypot(line.x2 - line.x1, line.y2 - line.y1));
-          return <g key={index}><defs><linearGradient id={id} gradientUnits="userSpaceOnUse" {...line}>
-            <stop offset="0" stop-color="var(--accent)" stop-opacity="0" /><stop offset={fade} stop-color="var(--accent)" />
-            <stop offset={1 - fade} stop-color="var(--accent)" /><stop offset="1" stop-color="var(--accent)" stop-opacity="0" />
-          </linearGradient></defs><line {...line} stroke={`url(#${id})`} stroke-width="1" stroke-dasharray="5 5" vector-effect="non-scaling-stroke" /></g>;
+          const color = axisEnd ? 'var(--paper-outline, var(--accent))' : 'var(--accent)';
+          const pigment = guideTarget && 'color' in guideTarget ? `pigment-${guideTarget.color}` : '';
+          return <g key={index} className={pigment} data-axis-guide={axisEnd}><defs><linearGradient id={id} gradientUnits="userSpaceOnUse" {...points}>
+            <stop offset="0" stop-color={color} stop-opacity={axisEnd === 'end' ? 1 : 0} /><stop offset={fade} stop-color={color} />
+            <stop offset={1 - fade} stop-color={color} /><stop offset="1" stop-color={color} stop-opacity={axisEnd === 'start' ? 1 : 0} />
+          </linearGradient></defs><line {...points} stroke={`url(#${id})`} stroke-width="1" stroke-dasharray="5 5" vector-effect="non-scaling-stroke" /></g>;
         })}
       </svg>}
       {visibleGroups.map(group => <section key={group.id} data-group={group.id} className={`group-frame ${selectedGroup === group.id ? 'selected' : ''} ${draft?.target === group.id ? 'connection-target' : ''}`} style={{ left: group.x, top: group.y, width: group.width, height: group.height }}>

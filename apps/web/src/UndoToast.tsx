@@ -1,6 +1,20 @@
 import { t, countLabel } from './locale';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Button } from './ui';
+import type { ComponentChildren } from 'preact';
+
+export function AnimatedBanner({ show, className, children }: { show: boolean; className: string; children: ComponentChildren }) {
+  const [present, setPresent] = useState(show);
+  const previous = useRef(children);
+  if (show) previous.current = children;
+  useEffect(() => {
+    if (show) { setPresent(true); return; }
+    const timer = setTimeout(() => setPresent(false), 180);
+    return () => clearTimeout(timer);
+  }, [show]);
+  if (!show && !present) return null;
+  return <div className={`${className} animated-banner ${show ? '' : 'leaving'}`} role="alert">{show ? children : previous.current}</div>;
+}
 
 export function UndoToast({ undo, dismiss, count = 1, message }: { undo?: () => void; dismiss: () => void; count?: number; message?: string }) {
   const [leaving, setLeaving] = useState(false);

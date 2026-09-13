@@ -1,3 +1,4 @@
+import { AnimatedBanner } from './UndoToast';
 import { loadClientConfig } from './client-config';
 import { t, localizeError, applyDocumentLocale } from './locale';
 import { render } from 'preact';
@@ -197,7 +198,7 @@ function App() {
       pendingKey.current?.cancel(); pendingKey.current = null; setKeyDialog(null);
     }} />}
     <input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={e => void importBackup(e.currentTarget.files?.[0])} />
-    {unlocked && error && <div className="error-banner" role="alert"><div><strong>{syncState === 'conflict' ? t("Конфликт версий") : t("Не удалось сохранить")}</strong><p>{error}</p></div><div className="error-actions">{syncState !== 'conflict' && <Button icon="retry" onClick={() => void sync.current?.flush()}>{t("Повторить")}</Button>}<Button icon="download" onClick={download}>{t("Скачать копию")}</Button>{syncState === 'conflict' && <Button onClick={() => setReloadDialog(true)}>{t("Загрузить с сервера")}</Button>}</div></div>}
+    <AnimatedBanner show={Boolean(unlocked && error)} className="error-banner"><div><strong>{syncState === 'conflict' ? t("Конфликт версий") : t("Не удалось сохранить")}</strong><p>{error}</p></div><div className="error-actions">{syncState !== 'conflict' && <Button icon="retry" onClick={() => void sync.current?.flush()}>{t("Повторить")}</Button>}<Button icon="download" onClick={download}>{t("Скачать копию")}</Button>{syncState === 'conflict' && <Button onClick={() => setReloadDialog(true)}>{t("Загрузить с сервера")}</Button>}</div></AnimatedBanner>
     <Modal open={lockDialog || reloadDialog} close={() => { if (!busy) { setLockDialog(false); setReloadDialog(false); } }} label={t("Сохранить локальную версию")}><Icon name="lock" size={28} /><h2>{t("Сначала сохрани свою версию.")}</h2><p>{lockDialog ? t("На сервер ушли не все изменения. Скачай зашифрованную копию или вернись к доске.") : t("Загрузка с сервера заменит локальные изменения. Сначала можно скачать зашифрованную копию.")}</p><p className="muted">{t("Копия открывается только исходным ключом этой доски.")}</p><Button className="primary" icon="download" onClick={download}>{backupReady ? t("Скачать копию ещё раз") : t("Скачать копию")}</Button><Button className="secondary" disabled={busy} onClick={() => lockDialog ? void lock(true) : void reload()}>{lockDialog ? t("Выйти без сохранения") : t("Заменить локальную версию")}</Button><Button className="text-button" onClick={() => { setLockDialog(false); setReloadDialog(false); }}>{t("Вернуться к доске")}</Button></Modal>
   </main>;
 }

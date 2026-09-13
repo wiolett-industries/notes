@@ -1,3 +1,4 @@
+import { AnimatedBanner } from './UndoToast';
 import { applyBoardListLimits } from './client-config';
 import { readCamera, rememberCamera, flushCameras } from './camera-memory';
 import { t, countLabel, isStorageLimit, quotaMessage, storageUsage } from './locale';
@@ -432,7 +433,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
       {selected.role === 'owner' && <Button icon="upload" label={t("Открыть зашифрованную копию")} onClick={() => input.current?.click()} />}
       <Button icon="logout" label={t("Выйти")} onClick={() => void action(async () => { if (!(await manager.current!.flush())) throw new Error(t("Сначала сохраните изменения.")); await logout(); })} />
     </>} /> : <div className="login-screen"><Button onClick={() => void action(async () => { await list(); setMenu(true); })} disabled={busy}>{busy ? <span className="spinner" /> : t("Открыть список досок")}</Button></div>}
-    {error && <div className="workspace-error floating" role="alert">{error}<Button icon="retry" label={t("Повторить")} onClick={() => void action(async () => { await flushNames(); if (manager.current) await manager.current.flush(); else { const all = await list(); if (all[0]) await select(all[0]); } })} /><Button icon="close" label={t("Закрыть")} onClick={() => setError('')} /></div>}
+    <AnimatedBanner show={Boolean(error)} className="workspace-error floating">{error}<Button icon="retry" label={t("Повторить")} onClick={() => void action(async () => { await flushNames(); if (manager.current) await manager.current.flush(); else { const all = await list(); if (all[0]) await select(all[0]); } })} /><Button icon="close" label={t("Закрыть")} onClick={() => setError('')} /></AnimatedBanner>
     <input hidden ref={input} type="file" accept="application/json,.json" onChange={e => { const file = e.currentTarget.files?.[0]; e.currentTarget.value = ''; void action(() => restore(file)); }} />
     <Modal open={limitReached} close={() => setLimitReached(false)} label={t("Лимит доски достигнут")}><p>{quotaMessage(selected?.limitBytes ?? BOARD_STORAGE_LIMIT)}</p><p>{t("Последние изменения пока не сохранены. Освободите место, чтобы продолжить сохранение.")}</p></Modal>
     <Modal open={menu} close={() => setMenu(false)} className="workspace-dialog" label={t("Доски")}>

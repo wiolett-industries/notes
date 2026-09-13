@@ -5,7 +5,7 @@ export type Rect = Point & { width: number; height: number };
 export type Endpoint = Rect & { id: string };
 export type GuideLine = { x1: number; y1: number; x2: number; y2: number };
 export function alignmentGuides(source: Rect, candidates: Endpoint[], excluded: Set<string>, zoom: number): GuideLine[] {
-  let nearest: Endpoint | undefined, distance = (160 / zoom) ** 2;
+  let nearest: Endpoint | undefined, distance = (600 / zoom) ** 2;
   for (const candidate of candidates) {
     if (excluded.has(candidate.id)) continue;
     const dx = Math.max(0, source.x - candidate.x - candidate.width, candidate.x - source.x - source.width);
@@ -14,7 +14,7 @@ export function alignmentGuides(source: Rect, candidates: Endpoint[], excluded: 
     if (next < distance) { nearest = candidate; distance = next; }
   }
   if (!nearest) return [];
-  const lines: GuideLine[] = [], tolerance = 3 / zoom, extension = 24 / zoom;
+  const lines: GuideLine[] = [], tolerance = 8 / zoom, extension = 24 / zoom;
   for (const fraction of [0, .5, 1]) {
     const x = nearest.x + nearest.width * fraction, y = nearest.y + nearest.height * fraction;
     if ([0, .5, 1].some(part => Math.abs(source.x + source.width * part - x) <= tolerance)) lines.push({ x1: x, x2: x, y1: Math.min(source.y, nearest.y) - extension, y2: Math.max(source.y + source.height, nearest.y + nearest.height) + extension });
