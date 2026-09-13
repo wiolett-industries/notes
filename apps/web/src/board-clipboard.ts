@@ -42,6 +42,6 @@ export function pasteSelection(board: BoardData, source: BoardData, offset: { x:
   const connections = source.connections.map(edge => ({ ...edge, id: crypto.randomUUID(), source: ids.get(edge.source)!, target: ids.get(edge.target)! }));
   if (board.notes.length + notes.length > 10000 || board.groups.length + groups.length > 5000 || board.connections.length + connections.length > 40000) throw new Error('Недостаточно места на доске для вставки.');
   const next = boardSchema.parse({ ...board, notes: [...board.notes, ...notes], groups: [...board.groups, ...groups], connections: [...board.connections, ...connections] });
-  if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error('Вставка превысит размер доски (92 МБ).');
+  if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error('Вставка превысит размер доски (300 МБ).');
   return { board: next, ids: notes.map(note => note.id) };
 }

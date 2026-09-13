@@ -117,6 +117,8 @@ export class SharedSync {
         this.pending = undefined;
         this.edited = !equal({ ...this.base, camera: null }, { ...this.current, camera: null });
       } catch (error) {
+        // A rejected oversized delta must not prevent the user deleting data next.
+        if (error instanceof ApiError && error.status === 413) { this.pending = undefined; this.edited = true; }
         if (error instanceof ApiError && error.status === 409 && ++conflicts <= 5) { this.pending = undefined; await this.resync(); continue; }
         throw error;
       }

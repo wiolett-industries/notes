@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { emptyBoard, type BoardData, type BoardEntry, type EntityVault, type NoteData } from '@quiet/shared';
+import { BOARD_STORAGE_LIMIT, BOARD_LIMIT_MESSAGE, emptyBoard, type BoardData, type BoardEntry, type EntityVault, type NoteData } from '@quiet/shared';
 import { Board } from './Board';
 import { Button, Icon } from './ui';
 import { BoardSocket } from './socket';
@@ -29,13 +29,24 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
   const [sharing, setSharing] = useState(false);
   const [profile, setProfile] = useState(false), [copiedUid, setCopiedUid] = useState(false);
   const [deleting, setDeleting] = useState<NamedBoard | null>(null);
+  const [limitReached, setLimitReached] = useState(false);
+  function reportError(message: string) { if (message.includes('300 МБ')) { setLimitReached(true); setError(''); } else setError(message); }
+  function usageBar(entry: NamedBoard) {
+    const bytes = entry.usedBytes ?? 0;
+    return <span className="board-storage" role="progressbar" aria-label="Занято на доске" aria-valuemin={0} aria-valuemax={300} aria-valuenow={Math.round(bytes / 1e6)} data-tooltip={`${(bytes / 1e6).toFixed(1)} / 300 МБ`}><span style={{ width: `${Math.min(100, bytes / BOARD_STORAGE_LIMIT * 100)}%` }} /></span>;
+  }
   const [name, setName] = useState('');
+  const renameTimer = useRef<ReturnType<typeof setTimeout>>();
+  const renames = useRef(new Map<string, { entry: NamedBoard; title: string; due: number }>());
+  const renaming = useRef<Promise<void> | null>(null);
   const [inviteUid, setInviteUid] = useState('');
   const [inviteRole, setInviteRole] = useState<'editor' | 'viewer'>('viewer');
   const [members, setMembers] = useState<{ uid: string; role: string; color: number }[]>([]);
   const [peers, setPeers] = useState<Peer[]>([]);
   const [people, setPeople] = useState(1);
   const [dragPreviews, setDragPreviews] = useState<Record<string, DragPosition>>({});
+  const dragAnimation = useRef(0), dragFrameTime = useRef(0);
+  const smoothDrags = useRef<Record<string, DragPosition>>({}), dragTargets = useRef<Record<string, DragPosition>>({});
   const [unlocking, setUnlocking] = useState<NoteData | null>(null);
   const socket = useRef<BoardSocket | null>(null), identity = useRef<SharingIdentity | null>(null);
   const manager = useRef<SharedSync | null>(null), current = useRef<NamedBoard | null>(null);
@@ -76,9 +87,9 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     const vault = opened.vault;
     const decoded = await decodeVault(entry.key, vault);
     if (!alive.current || generation.current !== version) return;
-    manager.current?.dispose(); current.current = entry; setSelected(entry); setBoard(decoded.board); setPeers([]); remoteDrags.current.clear(); setDragPreviews({});
+    manager.current?.dispose(); current.current = entry; setSelected(entry); setBoard(decoded.board); setPeers([]); remoteDrags.current.clear(); cancelAnimationFrame(dragAnimation.current); dragAnimation.current = 0; smoothDrags.current = {}; dragTargets.current = {}; setDragPreviews({});
     try { sessionStorage.setItem(`notes:active-board:${account.accountId}`, entry.id); } catch { /* optional preference */ }
-    manager.current = new SharedSync(socket.current!, entry.key, vault, decoded.board, decoded.index!, entry.role, value => { if (generation.current === version && alive.current) setBoard(value); }, message => { if (generation.current === version && alive.current) setError(message); });
+    manager.current = new SharedSync(socket.current!, entry.key, vault, decoded.board, decoded.index!, entry.role, value => { if (generation.current === version && alive.current) setBoard(value); }, message => { if (generation.current === version && alive.current) reportError(message); });
     selfId.current = opened.selfId; setPeople(new Set(opened.peers.map(peer => peer.uid)).size);
     for (const patch of switching.current?.patches ?? []) manager.current.receive(patch);
     switching.current = null; setMenu(false); setSharing(false);
@@ -97,19 +108,43 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
       if (source) await migrated();
     } finally { bytes.fill(0); }
   }
-  async function closeShare() {
-    if (working.current) return;
-    if (!selected || selected.role !== 'owner' || name.trim() === selected.title) { setSharing(false); return; }
-    await action(async () => {
-      const title = name.trim(); if (!title) throw new Error('У доски должно быть название.');
-      await socket.current!.request('boards.rename', { boardId: selected.id, name: await encryptValue(selected.key, selected.id, 'name', title) });
-      await list(); setSharing(false);
-    });
+  function flushNames(immediate = false): Promise<void> {
+    clearTimeout(renameTimer.current);
+    if (immediate) for (const value of renames.current.values()) value.due = 0;
+    if (renaming.current) return renaming.current;
+    renaming.current = (async () => {
+      while (renames.current.size) {
+        const [id, value] = renames.current.entries().next().value!;
+        const wait = value.due - performance.now();
+        if (wait > 0) { renameTimer.current = setTimeout(() => void flushNames(), wait); return; }
+        try {
+          await socket.current!.request('boards.rename', { boardId: id, name: await encryptValue(value.entry.key, id, 'name', value.title) });
+          if (renames.current.get(id) === value) renames.current.delete(id);
+          if (!alive.current) return;
+          setEntries(entries => entries.map(entry => entry.id === id ? { ...entry, title: value.title } : entry));
+          if (current.current?.id === id) { current.current = { ...current.current, title: value.title }; setSelected(current.current); }
+        } catch (error) { if (alive.current) reportError(authError(error)); return; }
+      }
+    })().finally(() => { renaming.current = null; });
+    return renaming.current;
+  }
+  function editName(value: string) {
+    setName(value); clearTimeout(renameTimer.current);
+    if (!selected || selected.role !== 'owner') return;
+    const title = value.trim();
+    if (!title) { renames.current.delete(selected.id); return; }
+    renames.current.set(selected.id, { entry: selected, title, due: performance.now() + 550 });
+    renameTimer.current = setTimeout(() => void flushNames(), 550);
+  }
+  function closeShare() {
+    setSharing(false);
+    void flushNames(true);
   }
   useEffect(() => {
     alive.current = true; const ws = new BoardSocket(); socket.current = ws;
     const off = [
-      ws.on('board.patch', data => { const target = switching.current; if (target && target.boardId === data.boardId) target.patches.push(data); }),
+      ws.on('board.patch', data => { const target = switching.current; if (target && target.boardId === data.boardId) target.patches.push(data); if (Number.isFinite(data.usedBytes)) setEntries(entries => entries.map(entry => entry.id === data.boardId ? { ...entry, usedBytes: data.usedBytes } : entry)); }),
+      ws.on('connected', () => { if (renames.current.size) void flushNames(); }),
       ws.on('boards.changed', () => { if (identity.current) void list().catch(err => setError(authError(err))); }),
       ws.on('board.access', async data => {
         if (!identity.current) return;
@@ -159,15 +194,15 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
       } catch (err) { if (alive.current) setError(authError(err)); }
       finally { if (alive.current) setBusy(false); }
     })();
-    function unload(event: BeforeUnloadEvent) { if (manager.current?.dirty) { event.preventDefault(); event.returnValue = ''; } }
+    function unload(event: BeforeUnloadEvent) { if (manager.current?.dirty || renames.current.size) { event.preventDefault(); event.returnValue = ''; } }
     window.addEventListener('beforeunload', unload);
     const stale = setInterval(() => { let changed = false; for (const [id, drag] of remoteDrags.current) if (Date.now() - drag.at > 2000) { remoteDrags.current.delete(id); changed = true; } if (changed) renderDrags(); }, 1000);
-    return () => { alive.current = false; generation.current++; manager.current?.dispose(); for (const fn of off) fn(); ws.close(); clearInterval(stale); window.removeEventListener('beforeunload', unload); };
+    return () => { alive.current = false; generation.current++; cancelAnimationFrame(dragAnimation.current); clearTimeout(renameTimer.current); manager.current?.dispose(); for (const fn of off) fn(); ws.close(); clearInterval(stale); window.removeEventListener('beforeunload', unload); };
   }, [account.accountId]);
   async function action(fn: () => Promise<void>) {
     if (working.current) return;
     working.current = true; setBusy(true); setError('');
-    try { await fn(); } catch (err) { setError(authError(err)); } finally { working.current = false; setBusy(false); }
+    try { await fn(); } catch (err) { reportError(authError(err)); } finally { working.current = false; setBusy(false); }
   }
   function change(next: BoardData) { manager.current?.update(next); setBoard(manager.current?.board ?? next); }
   async function toggleLock(id: string) {
@@ -261,7 +296,31 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     sendEphemeral('drag', { ids: dragIds.current, positions: positions ?? [], ended: !positions, sequence: ++sequence.current });
     if (!positions) dragIds.current = [];
   }
-  function renderDrags() { setDragPreviews(Object.fromEntries([...remoteDrags.current.values()].flatMap(drag => drag.positions.map(position => [position.id, position])))); }
+  function renderDrags() {
+    dragTargets.current = Object.fromEntries([...remoteDrags.current.values()].flatMap(drag => drag.positions.map(position => [position.id, position])));
+    if (dragAnimation.current) return;
+    const notes = new Map(manager.current?.board.notes.map(note => [note.id, note]));
+    for (const [id, target] of Object.entries(dragTargets.current)) if (!smoothDrags.current[id]) smoothDrags.current[id] = { ...target, ...(notes.get(id) ? { x: notes.get(id)!.x, y: notes.get(id)!.y, width: notes.get(id)!.width, height: notes.get(id)!.height } : {}) };
+    dragFrameTime.current = performance.now();
+    function frame(now: number) {
+      const alpha = 1 - Math.exp(-Math.min(64, now - dragFrameTime.current) / 35);
+      dragFrameTime.current = now;
+      const next: Record<string, DragPosition> = {};
+      let moving = false;
+      for (const [id, target] of Object.entries(dragTargets.current)) {
+        const previous = smoothDrags.current[id] ?? target, value = { ...target };
+        for (const key of ['x', 'y', 'width', 'height'] as const) {
+          const delta = target[key] - previous[key];
+          value[key] = Math.abs(delta) < .1 ? target[key] : previous[key] + delta * alpha;
+          if (Math.abs(delta) >= .1) moving = true;
+        }
+        next[id] = value;
+      }
+      smoothDrags.current = next; setDragPreviews(next);
+      dragAnimation.current = moving ? requestAnimationFrame(frame) : 0;
+    }
+    dragAnimation.current = requestAnimationFrame(frame);
+  }
   async function receiveDrag(data: { boardId: string; id: string; uid: string; envelope: any; ids: string[] }) {
     const active = current.current;
     if (!active || active.id !== data.boardId || data.uid === account.accountId) return;
@@ -297,24 +356,25 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
   const publicUrl = selected?.publicToken ? `${location.origin}/#public=${selected.publicToken}` : '';
   return <>
     {selected && people > 1 && <div className="board-presence-count" title="Участников на доске" aria-label={`На доске ${people} участников`}><Icon name="user" size={16} /><span>{people}</span></div>}
-    {selected ? <Board key={selected.id} board={board} onChange={change} role={selected.role} peers={peers} onCursor={cursor} onSelection={selection} onDrag={dragging} dragPreviews={dragPreviews} noteBusy={noteBusy} onToggleLock={toggleLock} clipboardKey={selected.key} accountId={selected.id} interactionBlocked={menu || sharing || profile || busy || Boolean(unlocking) || Boolean(deleting)} actions={<>
-      <Button className="board-picker" icon="boards" onClick={() => setMenu(true)} label="Выбрать доску"><span className="board-picker-label">{selected.title}</span></Button>
+    {selected ? <Board key={selected.id} board={board} onChange={change} onStorageLimit={() => setLimitReached(true)} role={selected.role} peers={peers} onCursor={cursor} onSelection={selection} onDrag={dragging} dragPreviews={dragPreviews} noteBusy={noteBusy} onToggleLock={toggleLock} clipboardKey={selected.key} accountId={selected.id} interactionBlocked={menu || sharing || profile || busy || Boolean(unlocking) || Boolean(deleting) || limitReached} actions={<>
+      <Button className="board-picker" icon="boards" onClick={() => void action(async () => { await list(); setMenu(true); })} label="Выбрать доску"><span className="board-picker-label">{selected.title}</span></Button>
       <Button icon="user" label={`UID: ${account.accountId}`} onClick={() => { setCopiedUid(false); setProfile(true); }} />
       {selected.role === 'owner' && <Button icon="share" label="Доступ к доске" onClick={() => void action(share)} />}
       <Button icon="download" label="Скачать зашифрованную копию" onClick={() => void action(download)} />
       {selected.role === 'owner' && <Button icon="upload" label="Открыть зашифрованную копию" onClick={() => input.current?.click()} />}
       <Button icon="logout" label="Выйти" onClick={() => void action(async () => { if (!(await manager.current!.flush())) throw new Error('Сначала сохраните изменения.'); await logout(); })} />
-    </>} /> : <div className="login-screen"><Button onClick={() => setMenu(true)} disabled={busy}>{busy ? <span className="spinner" /> : 'Открыть список досок'}</Button></div>}
-    {error && <div className="workspace-error floating" role="alert">{error}<Button icon="retry" label="Повторить" onClick={() => void action(async () => { if (manager.current) await manager.current.flush(); else { const all = await list(); if (all[0]) await select(all[0]); } })} /><Button icon="close" label="Закрыть" onClick={() => setError('')} /></div>}
+    </>} /> : <div className="login-screen"><Button onClick={() => void action(async () => { await list(); setMenu(true); })} disabled={busy}>{busy ? <span className="spinner" /> : 'Открыть список досок'}</Button></div>}
+    {error && <div className="workspace-error floating" role="alert">{error}<Button icon="retry" label="Повторить" onClick={() => void action(async () => { await flushNames(); if (manager.current) await manager.current.flush(); else { const all = await list(); if (all[0]) await select(all[0]); } })} /><Button icon="close" label="Закрыть" onClick={() => setError('')} /></div>}
     <input hidden ref={input} type="file" accept="application/json,.json" onChange={e => { const file = e.currentTarget.files?.[0]; e.currentTarget.value = ''; void action(() => restore(file)); }} />
+    <Modal open={limitReached} close={() => setLimitReached(false)} label="Лимит доски достигнут"><p>{BOARD_LIMIT_MESSAGE}</p><p>Последние изменения пока не сохранены. Освободите место, чтобы продолжить сохранение.</p></Modal>
     <Modal open={menu} close={() => setMenu(false)} className="workspace-dialog" label="Доски">
       {error && <p className="key-error" role="alert">{error}</p>}
       <div className="board-section-heading"><h3>Мои доски <span>{own.length}/3</span></h3><Button icon="plus" label="Создать доску" disabled={busy || own.length >= 3} onClick={() => void action(() => create(`Доска ${own.length + 1}`))} /></div>
       <div className="board-list" role="list">{own.map(entry => <div role="listitem" className="owned-board-row" key={entry.id}><Button className={`board-list-item ${entry.id === selected?.id ? 'current-board' : ''}`} disabled={busy} onClick={() => void action(() => select(entry))} aria-current={entry.id === selected?.id ? 'true' : undefined}>
-        <span className="board-miniature"><Icon name="boards" size={22} /></span><span className="board-entry-copy"><span className="board-list-name">{entry.title}</span><span className="board-entry-detail">{entry.publicToken ? 'Есть публичный снимок' : 'Личная доска'}</span></span><span className="board-entry-status"><Icon name={entry.id === selected?.id ? 'check' : 'next'} size={16} /></span>
+        <span className="board-miniature"><Icon name="boards" size={22} /></span><span className="board-entry-copy"><span className="board-list-name">{entry.title}</span><span className="board-entry-detail">{entry.publicToken ? 'Есть публичный снимок' : 'Личная доска'} · {((entry.usedBytes ?? 0) / 1e6).toFixed(1)} / 300 МБ</span></span><span className="board-entry-status"><Icon name={entry.id === selected?.id ? 'check' : 'next'} size={16} /></span>{usageBar(entry)}
       </Button><Button icon="trash" className="board-delete-action" label={`Удалить доску «${entry.title}»`} disabled={busy} onClick={() => { setError(''); setDeleting(entry); }} /></div>)}</div>
       {invited.length > 0 && <><div className="board-section-heading"><h3>Приглашённые <span>{invited.length}</span></h3></div><div className="board-list" role="list">{invited.map(entry => <div role="listitem" key={entry.id}><Button className={`board-list-item ${entry.id === selected?.id ? 'current-board' : ''}`} disabled={busy} onClick={() => void action(() => select(entry))} aria-current={entry.id === selected?.id ? 'true' : undefined}>
-        <span className="board-miniature shared"><Icon name="share" size={22} /></span><span className="board-entry-copy"><span className="board-list-name">{entry.title}</span><span className="board-entry-detail">{entry.role === 'editor' ? 'Редактор' : 'Только просмотр'}</span></span><span className="board-entry-status"><Icon name={entry.id === selected?.id ? 'check' : 'next'} size={16} /></span>
+        <span className="board-miniature shared"><Icon name="share" size={22} /></span><span className="board-entry-copy"><span className="board-list-name">{entry.title}</span><span className="board-entry-detail">{entry.role === 'editor' ? 'Редактор' : 'Только просмотр'} · {((entry.usedBytes ?? 0) / 1e6).toFixed(1)} / 300 МБ</span></span><span className="board-entry-status"><Icon name={entry.id === selected?.id ? 'check' : 'next'} size={16} /></span>{usageBar(entry)}
       </Button></div>)}</div></>}
     </Modal>
     <Modal open={Boolean(deleting)} close={() => { if (!busy) setDeleting(null); }} label="Удалить доску?" className="workspace-dialog">
@@ -329,7 +389,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     </Modal>
     <Modal open={sharing} close={() => void closeShare()} className="workspace-dialog" label="Доступ к доске">
       {error && <p className="key-error" role="alert">{error}</p>}
-      <label>Название<input className="access-key-input" value={name} maxLength={120} onInput={e => setName(e.currentTarget.value)} /></label>
+      <label>Название<input className="access-key-input" value={name} maxLength={120} onInput={e => editName(e.currentTarget.value)} /></label>
       <label>UID участника<input className="access-key-input" value={inviteUid} onInput={e => setInviteUid(e.currentTarget.value)} autoComplete="off" /></label>
       <RoleDropdown value={inviteRole} change={setInviteRole} disabled={busy} />
       <Button disabled={busy || !inviteUid.trim() || (members.length >= 10 && !members.some(member => member.uid === inviteUid.trim()))} onClick={() => void action(invite)}>Добавить участника</Button>

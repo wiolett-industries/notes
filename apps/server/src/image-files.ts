@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { envelopeSchema, publicSnapshotSchema, type Envelope, type PublicSnapshot } from '@quiet/shared';
 
@@ -25,6 +25,7 @@ export function imageFiles(directory: string) {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   return {
+    snapshotBytes(name: string) { return statSync(snapshotPath(name)).size; },
     writeSnapshot(snapshot: PublicSnapshot) {
       const serialized = JSON.stringify(publicSnapshotSchema.parse(snapshot));
       const name = `${randomUUID()}.public.json`;

@@ -62,13 +62,13 @@ export async function prepareDelta(key: CryptoKey, accountId: string, revision: 
     const old = previous?.get(id);
     const access = shared ? accessFor(notes, address) : undefined;
     if (old && oldRecords?.has(address) && sameValue(data, oldRecords.get(address)) && (!shared || sameValue(access, accessFor(oldNotes!, address)))) {
-      size += old.bytes; if (size > MAX_BOARD_BYTES) throw new Error('Доска превышает 92 МБ.');
+      size += old.bytes; if (size > MAX_BOARD_BYTES) throw new Error('Доска превышает 300 МБ.');
       index.set(id, old); continue;
     }
     const bytes = encoder.encode(JSON.stringify({ address, data }));
     size += bytes.byteLength;
     try {
-      if (size > MAX_BOARD_BYTES) throw new Error('Доска превышает 92 МБ. Удалите часть изображений.');
+      if (size > MAX_BOARD_BYTES) throw new Error('Доска превышает 300 МБ. Удалите часть изображений.');
       const fingerprint = await digest(shared ? encoder.encode(JSON.stringify([JSON.stringify({ address, data }), access])) : bytes);
       if (old?.fingerprint === fingerprint) { index.set(id, old); continue; }
       const envelope = await encrypt(key, accountId, id, revision + 1, bytes);

@@ -15,10 +15,10 @@ import { participantColor as peerColor } from './participant-color';
 
 const labels: Record<NoteColor, string> = { sand: 'Песочный', sage: 'Шалфей', rose: 'Розовый', lavender: 'Лавандовый', sky: 'Голубой' };
 type DragPosition = { id: string; x: number; y: number; width: number; height: number };
-type Props = { board: BoardData; onChange: (board: BoardData) => void; locked?: boolean; noteBusy?: string | null; onToggleLock: (id: string) => Promise<void>; actions?: ComponentChildren; clipboardKey: CryptoKey; accountId: string; interactionBlocked?: boolean; role?: 'owner' | 'editor' | 'viewer'; peers?: { id: string; uid: string; role: string; color?: number; x: number; y: number; selection?: string[] }[]; onCursor?: (point: Point | null) => void; onSelection?: (ids: string[]) => void; onDrag?: (positions: DragPosition[] | null) => void; dragPreviews?: Record<string, Omit<DragPosition, 'id'>> };
-type Gesture = { kind: 'pan' | 'note' | 'resize' | 'connect' | 'selection' | 'group'; pointer: number; start: Point; camera: BoardData['camera']; note?: NoteData; edge?: string; moved?: NoteData[]; bounds?: ReturnType<typeof groupBounds>; selection?: string[]; group?: string };
+type Props = { board: BoardData; onChange: (board: BoardData) => void; onStorageLimit?: () => void; locked?: boolean; noteBusy?: string | null; onToggleLock: (id: string) => Promise<void>; actions?: ComponentChildren; clipboardKey: CryptoKey; accountId: string; interactionBlocked?: boolean; role?: 'owner' | 'editor' | 'viewer'; peers?: { id: string; uid: string; role: string; color?: number; x: number; y: number; selection?: string[] }[]; onCursor?: (point: Point | null) => void; onSelection?: (ids: string[]) => void; onDrag?: (positions: DragPosition[] | null) => void; dragPreviews?: Record<string, Omit<DragPosition, 'id'>> };
+type Gesture = { kind: 'pan' | 'note' | 'resize' | 'connect' | 'selection' | 'group'; pointer: number; start: Point; camera: BoardData['camera']; note?: NoteData; edge?: string; moved?: NoteData[]; bounds?: ReturnType<typeof groupBounds>; selection?: string[]; group?: string; speedSample?: Point & { time: number }; detached?: Map<string, string> };
 type Draft = { source: string; point: Point; target?: string };
-export function Board({ board: incoming, onChange, locked = false, noteBusy = null, onToggleLock, actions, clipboardKey, accountId, interactionBlocked = false, role = 'owner', peers = [], onCursor, onSelection, onDrag, dragPreviews }: Props) {
+export function Board({ board: incoming, onChange, onStorageLimit, locked = false, noteBusy = null, onToggleLock, actions, clipboardKey, accountId, interactionBlocked = false, role = 'owner', peers = [], onCursor, onSelection, onDrag, dragPreviews }: Props) {
   const board = incoming;
   const root = useRef<HTMLDivElement>(null);
   const current = useRef(board); current.current = board;
@@ -78,7 +78,8 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
   const lastPaste = useRef({ signature: '', count: 0 });
   const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState('');
-  const [lastDeleted, setLastDeleted] = useState<{ note: NoteData; connections: ConnectionData[]; group?: GroupData } | null>(null);
+  useEffect(() => { if (notice.includes('300 МБ') && onStorageLimit) { onStorageLimit(); setNotice(''); } }, [notice]);
+  const [lastDeleted, setLastDeleted] = useState<{ id: string; notes: NoteData[]; connections: ConnectionData[]; groups: GroupData[] } | null>(null);
   const pointers = useRef(new Map<number, Point>());
   const gesture = useRef<Gesture | null>(null);
   const pinch = useRef<{ distance: number; midpoint: Point; camera: BoardData['camera'] } | null>(null);
@@ -256,7 +257,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     update(cleanGroups({ ...current.current, groups: current.current.groups.filter(g => g.id !== id) }));
     selectGroup(null); editGroup(null);
   }
-  function assignGroups(ids: string[], bounds: ReturnType<typeof groupBounds>) {
+  function assignGroups(ids: string[], bounds: ReturnType<typeof groupBounds>, detached?: Map<string, string>) {
     if (access.current === 'viewer') return;
     const { byId } = noteIndex();
     const assigned = new Set<string>();
@@ -265,9 +266,10 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     for (const id of ids) {
       const note = byId.get(id);
       if (!note || !canGroup([id])) continue;
+      if (detached && current.current.groups.some(group => group.noteIds.includes(id))) continue;
       const point = center(note);
       let target: typeof bounds[number] | undefined;
-      for (const rect of eligibleBounds) if (contains(rect, point) && (!target || rect.width * rect.height < target.width * target.height)) target = rect;
+      for (const rect of eligibleBounds) if (rect.id !== detached?.get(id) && contains(rect, point) && (!target || rect.width * rect.height < target.width * target.height)) target = rect;
       assigned.add(id);
       if (target) { const members = additions.get(target.id) ?? []; members.push(id); additions.set(target.id, members); }
     }
@@ -312,13 +314,15 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
       return next;
     }) });
   }
-  function remove(id: string) {
-    const note = current.current.notes.find(n => n.id === id);
-    if (!note || !canEdit(note) || noteBusy === id) return;
-    const group = current.current.groups.find(g => g.noteIds.includes(id));
-    const removed = new Set([id, ...(group?.noteIds.length === 1 ? [group.id] : [])]);
-    setLastDeleted({ note, group, connections: current.current.connections.filter(edge => removed.has(edge.source) || removed.has(edge.target)) });
-    update(cleanGroups({ ...current.current, notes: current.current.notes.filter(n => n.id !== id) })); select(null); setSelectedIds(ids => ids.filter(item => item !== id)); setEditing(null); setConnection(null);
+  function remove(ids: string | string[]) {
+    const selected = new Set(typeof ids === 'string' ? [ids] : ids);
+    const notes = current.current.notes.filter(note => selected.has(note.id) && canEdit(note) && noteBusy !== note.id);
+    if (!notes.length) return;
+    const removed = new Set(notes.map(note => note.id));
+    const groups = current.current.groups.filter(group => group.noteIds.some(id => removed.has(id)));
+    const endpoints = new Set([...removed, ...groups.filter(group => group.noteIds.every(id => removed.has(id))).map(group => group.id)]);
+    setLastDeleted({ id: crypto.randomUUID(), notes, groups, connections: current.current.connections.filter(edge => endpoints.has(edge.source) || endpoints.has(edge.target)) });
+    update(cleanGroups({ ...current.current, notes: current.current.notes.filter(note => !removed.has(note.id)) })); clearSelection();
   }
   function removeEdge(id: string) { if (access.current === 'viewer' || id.startsWith('mention:')) return; update({ ...current.current, connections: current.current.connections.filter(edge => edge.id !== id) }); selectEdge(null); editEdge(null); }
   function connect(source: string, target: string) {
@@ -345,7 +349,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
         const height = clamp(snap(width / decoded.ratio + 40), 120, 640);
         const note: NoteData = { id: crypto.randomUUID(), kind: 'image', title: file.name.slice(0, 240), text: '', pinned: false, mentions: [], color: 'sky', width, height, image: decoded.image, x: clamp(snap(p.x - width / 2 + index * 24), -1e9, 1e9), y: clamp(snap(p.y - height / 2 + index * 24), -1e9, 1e9) };
         const next = { ...current.current, notes: [...current.current.notes, note] };
-        if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error('На доске недостаточно места для картинки (лимит 92 МБ).');
+        if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error('На доске недостаточно места для картинки (лимит 300 МБ).');
         const bounds = groupBounds(current.current.groups, current.current.notes);
         update(next); assignGroups([note.id], bounds); select(note.id); setSelectedIds([]); chooseMode('select');
       }
@@ -432,7 +436,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
       if (e.key === 'Escape') { clearSelection(); setSearchOpen(false); }
       if (e.code === 'KeyN' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); add(); }
       if (e.code === 'KeyG' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); makeGroup(); }
-      if ((e.key === 'Delete' || e.key === 'Backspace') && (selected || selectedEdge)) { e.preventDefault(); if (selectedEdge) removeEdge(selectedEdge); else if (selected) remove(selected); }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && (selectedNotes().length || selectedEdge)) { e.preventDefault(); if (selectedEdge) removeEdge(selectedEdge); else remove(selectedNotes()); }
       if (e.key === '0' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); fit(); }
     }
     function up(e: KeyboardEvent) { if (e.code === 'Space') setSpace(false); }
@@ -486,6 +490,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
     const movedIds = new Set(ids);
     if (!note || !selectedIds.includes(note.id)) setSelectedIds([]);
     gesture.current = { kind, pointer: e.pointerId, start: { x: e.clientX, y: e.clientY }, camera: { ...current.current.camera }, note, edge, group: group?.id, moved: current.current.notes.filter(n => movedIds.has(n.id) && n.id !== noteBusy && !n.pinned), bounds: groupBounds(current.current.groups, current.current.notes) };
+    if (kind === 'note') { gesture.current.speedSample = { x: e.clientX, y: e.clientY, time: e.timeStamp }; gesture.current.detached = new Map(); }
   }
   function pointerMove(e: PointerEvent) {
     const target = document.elementFromPoint(e.clientX, e.clientY);
@@ -530,6 +535,22 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
       patch(note.id, { x: clamp(x, -1e9, 1e9), y: clamp(y, -1e9, 1e9), width, height });
       previewDrag([note.id]);
     } else if ((g.kind === 'note' || g.kind === 'group') && g.moved?.length) {
+      if (g.kind === 'note' && g.speedSample) {
+        const elapsed = e.timeStamp - g.speedSample.time;
+        if (elapsed >= 24) {
+          const distance = Math.hypot(e.clientX - g.speedSample.x, e.clientY - g.speedSample.y);
+          // Screen-space speed makes the gesture consistent at every board zoom.
+          if (elapsed <= 100 && distance >= 24 && distance / elapsed > 1.2) {
+            const movedIds = new Set(g.moved.map(note => note.id));
+            const groups = current.current.groups.map(group => ({ ...group, noteIds: group.noteIds.filter(id => {
+              if (!movedIds.has(id) || !canGroup(group.noteIds)) return true;
+              g.detached!.set(id, group.id); return false;
+            }) }));
+            update(cleanGroups({ ...current.current, groups }));
+          }
+          g.speedSample = { x: e.clientX, y: e.clientY, time: e.timeStamp };
+        }
+      }
       const moved = new Map(g.moved.map(note => [note.id, note]));
       update({ ...current.current, notes: current.current.notes.map(note => {
         const original = moved.get(note.id);
@@ -547,7 +568,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
       if (target) connect(value.source, target.id);
     }
     const g = gesture.current;
-    if (g?.kind === 'note' && g.moved && g.bounds && Math.hypot(e.clientX - g.start.x, e.clientY - g.start.y) >= 3) assignGroups(g.moved.map(n => n.id), g.bounds);
+    if (g?.kind === 'note' && g.moved && g.bounds && e.type !== 'pointercancel' && Math.hypot(e.clientX - g.start.x, e.clientY - g.start.y) >= 3) assignGroups(g.moved.map(n => n.id), g.bounds, g.detached);
     if (g?.kind === 'selection' && Math.hypot(e.clientX - g.start.x, e.clientY - g.start.y) < 3) {
       const point = world({ x: e.clientX, y: e.clientY });
       const note = [...current.current.notes].reverse().find(n => contains(n, point));
@@ -604,6 +625,7 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
       {visibleNotes.map(note => <article key={note.id} data-note={note.id} className={`note pigment-${note.color} ${remoteSelections.has(note.id) ? 'remote-selected' : ''} ${note.pinned ? 'pinned-note' : ''} ${note.kind === 'image' ? 'image-note' : ''} ${note.sealed ? 'sealed-note' : ''} ${selectedSet.has(note.id) ? 'multi-selected' : ''} ${selected === note.id ? 'selected' : ''} ${draft?.target === note.id ? 'connection-target' : ''} ${draft?.source === note.id ? 'connection-source' : ''}`} style={{ transform: `translate(${note.x}px, ${note.y}px)`, width: note.width, height: note.height, '--peer-color': remoteSelections.get(note.id)?.color }} onFocusIn={() => select(note.id)}>
         <div className="note-handle" aria-label="Заголовок заметки">
           {canEdit(note) && editing?.id === note.id && editing.field === 'title' ? <input className="note-title" aria-label="Название заметки" value={note.title} maxLength={240} readOnly={noteBusy === note.id} onInput={e => patch(note.id, { title: e.currentTarget.value })} onBlur={() => setEditing(null)} onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') { e.stopPropagation(); setEditing(null); } }} /> : <span className="note-title" onDblClick={e => { e.stopPropagation(); startEditing(note.id, 'title'); }}>{note.title || 'Заметка'}</span>}
+          {note.kind === 'image' && note.image && !note.sealed && <Button className="note-download" icon="download" label="Скачать изображение" onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); const link = document.createElement('a'); link.href = note.image!; const extension = /^data:image\/(png|jpeg|webp|gif|avif);/.exec(note.image!)?.[1] ?? 'webp'; link.download = `${(note.title || 'image').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/\.(png|jpe?g|webp|gif|avif)$/i, '')}.${extension === 'jpeg' ? 'jpg' : extension}`; document.body.append(link); link.click(); link.remove(); }} />}
           <span className="grip"><Icon name="grip" size={16} /></span>
         </div>
         {note.sealed ? <div className="sealed-cover">
@@ -652,16 +674,20 @@ export function Board({ board: incoming, onChange, locked = false, noteBusy = nu
         <div className="toolbar floating board-actions" role="toolbar" aria-label="Сохранение и доступ">{actions}</div>
       </div>
       {searchOpen && <SearchPopover query={searchQuery} count={searchMatches.length} index={Math.min(searchIndex, Math.max(0, searchMatches.length - 1))} change={value => { setSearchQuery(value); setSearchIndex(0); }} step={stepSearch} close={closeSearch} />}
-      {lastDeleted && canEdit(lastDeleted.note) && <UndoToast key={lastDeleted.note.id} dismiss={() => setLastDeleted(null)} undo={() => {
-        if (!canEdit(lastDeleted.note) || current.current.notes.some(note => note.id === lastDeleted.note.id)) return;
-        if (current.current.notes.length >= 10000) { setNotice('На доске уже 10000 заметок.'); return; }
-        const notes = [...current.current.notes, lastDeleted.note];
+      {lastDeleted && lastDeleted.notes.some(canEdit) && <UndoToast key={lastDeleted.id} count={lastDeleted.notes.length} dismiss={() => setLastDeleted(null)} undo={() => {
+        const existing = new Set(current.current.notes.map(note => note.id));
+        const restored = lastDeleted.notes.filter(note => canEdit(note) && !existing.has(note.id));
+        if (current.current.notes.length + restored.length > 10000) { setNotice('На доске уже 10000 заметок.'); return; }
+        const notes = [...current.current.notes, ...restored], restoredIds = new Set(restored.map(note => note.id));
         let groups = current.current.groups;
-        if (lastDeleted.group) {
-          const previous = lastDeleted.group;
-          groups = groups.some(g => g.id === previous.id) ? groups.map(g => g.id === previous.id ? { ...g, noteIds: [...g.noteIds, lastDeleted.note.id] } : g) : [...groups, { ...previous, noteIds: [lastDeleted.note.id] }];
+        for (const previous of lastDeleted.groups) {
+          const ids = previous.noteIds.filter(id => restoredIds.has(id));
+          if (!ids.length) continue;
+          groups = groups.some(g => g.id === previous.id) ? groups.map(g => g.id === previous.id ? { ...g, noteIds: [...new Set([...g.noteIds, ...ids])] } : g) : [...groups, { ...previous, noteIds: ids }];
         }
-        update(cleanGroups({ ...current.current, notes, groups, connections: [...current.current.connections, ...lastDeleted.connections].slice(0, 40000) })); setLastDeleted(null);
+        const edges = new Map(current.current.connections.map(edge => [edge.id, edge]));
+        for (const edge of lastDeleted.connections) if (!edges.has(edge.id)) edges.set(edge.id, edge);
+        update(cleanGroups({ ...current.current, notes, groups, connections: [...edges.values()].slice(0, 40000) })); setLastDeleted(null);
       }} />}
       {notice && <div className="undo-toast floating" role="alert">{notice}<Button icon="close" label="Закрыть уведомление" onClick={() => setNotice('')} /></div>}
     </>}

@@ -2,7 +2,7 @@ import { createHash, createPublicKey, randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import {
-  MAX_BOARD_BYTES, MAX_ENCRYPTED_BYTES, MAX_ENTITIES, MAX_TRANSFER_BYTES, base64url, deltaSchema,
+  BOARD_STORAGE_LIMIT, BOARD_LIMIT_MESSAGE, MAX_BOARD_BYTES, MAX_ENCRYPTED_BYTES, MAX_ENTITIES, MAX_TRANSFER_BYTES, base64url, deltaSchema,
   envelopeSchema, initialEntitiesSchema, publicSnapshotSchema,
   type AccountIdentity, type BoardEntry, type BoardRole, type DeltaWrite,
   type EntityWrite, type Envelope, type InitialEntities, type PublicSnapshot, type Vault,
@@ -22,7 +22,7 @@ type Access = NonNullable<EntityWrite['access']>;
 type EntityRow = { entity_id: string; revision: number; envelope: string; access: string; file_name: string | null };
 type BoardRow = { id: string; owner_id: string; name: string; revision: number; manifest: string; public_token: string | null; public_snapshot: string | null };
 export type CollaborationChange =
-  | { event: 'board.patch'; boardId: string; data: { boardId: string; revision: number; manifest: Envelope; upserts: (EntityWrite & { revision: number })[]; deletes: string[] } }
+  | { event: 'board.patch'; boardId: string; data: { boardId: string; usedBytes: number; revision: number; manifest: Envelope; upserts: (EntityWrite & { revision: number })[]; deletes: string[] } }
   | { event: 'board.access'; boardId: string; uids: string[] }
   | { event: 'boards.changed'; boardId: string; uids: string[] };
 
@@ -118,8 +118,15 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
     const membership = db.prepare('SELECT role, wrapped_key FROM collaboration_members WHERE board_id = ? AND uid = ?').get(boardId, uid) as { role: BoardRole; wrapped_key: string } | undefined;
     if (!membership) return fail(403, 'Нет доступа к доске.');
     const row = board(boardId);
-    return { id: row.id, ownerId: row.owner_id, role: membership.role, name: JSON.parse(row.name), wrappedKey: membership.wrapped_key, publicToken: membership.role === 'owner' ? row.public_token : null };
+    return { id: row.id, ownerId: row.owner_id, role: membership.role, name: JSON.parse(row.name), wrappedKey: membership.wrapped_key, publicToken: membership.role === 'owner' ? row.public_token : null, usedBytes: usage(boardId) };
   }
+  function usage(boardId: string) {
+    const row = board(boardId);
+    const entities = db.prepare('SELECT COALESCE(SUM(byte_length + length(access) + length(entity_id)), 0) AS bytes FROM collaboration_entities WHERE board_id = ?').get(boardId) as { bytes: number };
+    const snapshot = row.public_snapshot ? (publicFilePattern.test(row.public_snapshot) ? files.snapshotBytes(row.public_snapshot) : Buffer.byteLength(row.public_snapshot)) : 0;
+    return entities.bytes + Buffer.byteLength(row.name) + Buffer.byteLength(row.manifest) + snapshot;
+  }
+  function checkQuota(boardId: string) { if (usage(boardId) > BOARD_STORAGE_LIMIT) fail(413, BOARD_LIMIT_MESSAGE); }
   function identity(uid: string): AccountIdentity | null {
     const row = db.prepare('SELECT public_key, private_key, (initialized != 0 OR EXISTS (SELECT 1 FROM collaboration_boards WHERE owner_id = collaboration_identities.uid)) AS initialized FROM collaboration_identities WHERE uid = ?').get(uid) as { public_key: string; private_key: string; initialized: number } | undefined;
     return row ? { publicKey: row.public_key, privateKey: JSON.parse(row.private_key), initialized: Boolean(row.initialized) } : null;
@@ -252,6 +259,7 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
         db.prepare('INSERT INTO collaboration_boards VALUES (?, ?, ?, 1, ?, NULL, NULL)').run(value.id, uid, JSON.stringify(value.name), JSON.stringify(value.snapshot.manifest));
         db.prepare('INSERT INTO collaboration_members (board_id, uid, role, wrapped_key, color) VALUES (?, ?, ?, ?, 0)').run(value.id, uid, 'owner', value.wrappedKey);
         writeEntities(value.id, 1, [], value.snapshot.entities, [], created, retired);
+        checkQuota(value.id);
         db.prepare('UPDATE collaboration_identities SET initialized = 1 WHERE uid = ?').run(uid);
         return entry(uid, value.id);
       });
@@ -286,12 +294,13 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
         writeEntities(boardId, revision, previous, patch.upserts, patch.deletes, created, retired);
         const updated = db.prepare('UPDATE collaboration_boards SET revision = ?, manifest = ? WHERE id = ? AND revision = ?').run(revision, JSON.stringify(patch.manifest), boardId, patch.revision);
         if (updated.changes !== 1) fail(409, 'Доска изменилась.');
+        checkQuota(boardId);
         db.prepare('INSERT INTO collaboration_mutations VALUES (?, ?, ?, ?)').run(boardId, patch.mutationId, revision, requestHash);
         db.prepare('DELETE FROM collaboration_mutations WHERE board_id = ? AND revision < ?').run(boardId, revision - 256);
         committed = true;
         return { revision };
       });
-      if (committed) notify({ event: 'board.patch', boardId, data: { boardId, revision: result.revision, manifest: patch.manifest, upserts: patch.upserts.map(entity => ({ ...entity, revision: result.revision })), deletes: patch.deletes } });
+      if (committed) notify({ event: 'board.patch', boardId, data: { boardId, usedBytes: usage(boardId), revision: result.revision, manifest: patch.manifest, upserts: patch.upserts.map(entity => ({ ...entity, revision: result.revision })), deletes: patch.deletes } });
       return result;
     },
     delete(uid: string, boardId: string) {
@@ -312,7 +321,7 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
     },
     rename(uid: string, boardId: string, name: Envelope) {
       const value = nameSchema.parse(name);
-      const uids = transaction(() => { owner(uid, boardId); db.prepare('UPDATE collaboration_boards SET name = ? WHERE id = ?').run(JSON.stringify(value), boardId); return memberIds(boardId); });
+      const uids = transaction(() => { owner(uid, boardId); db.prepare('UPDATE collaboration_boards SET name = ? WHERE id = ?').run(JSON.stringify(value), boardId); checkQuota(boardId); return memberIds(boardId); });
       notify({ event: 'boards.changed', boardId, uids });
       return { ok: true };
     },
@@ -368,6 +377,8 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
       const result = transaction((_created, _retired, snapshots) => {
         owner(uid, boardId);
         const previous = board(boardId);
+        const previousBytes = previous.public_snapshot ? (publicFilePattern.test(previous.public_snapshot) ? files.snapshotBytes(previous.public_snapshot) : Buffer.byteLength(previous.public_snapshot)) : 0;
+        if (snapshot !== null && usage(boardId) - previousBytes + Buffer.byteLength(serialized!) > BOARD_STORAGE_LIMIT) fail(413, BOARD_LIMIT_MESSAGE);
         const token = snapshot === null ? null : previous.public_token ?? randomBytes(32).toString('base64url');
         const reference = snapshot === null ? null : files.writeSnapshot(snapshot);
         if (reference) snapshots.created.push(reference);

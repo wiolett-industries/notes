@@ -17,6 +17,6 @@ export function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
   const Component = icons[name];
   return <Component size={size} strokeWidth={1.6} aria-hidden="true" />;
 }
-export function Button({ children, icon, label, className = '', ...props }: JSX.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: IconName; label?: string }) {
-  return <button type="button" {...props} className={`button ${className}`} aria-label={label} data-tooltip={label}>{icon && <Icon name={icon} />}{children}</button>;
+export function Button({ children, icon, label, tooltip = true, className = '', ...props }: JSX.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: IconName; label?: string; tooltip?: boolean }) {
+  return <button type="button" {...props} className={`button ${className}`} aria-label={label} data-tooltip={tooltip ? label : undefined}>{icon && <Icon name={icon} />}{children}</button>;
 }

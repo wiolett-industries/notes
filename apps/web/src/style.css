@@ -39,6 +39,8 @@ button:not(:disabled) { cursor: pointer; }
 .note-index { font-size: 10px; letter-spacing: 1.6px; opacity: .65; font-weight: 600; }
 .grip { font-size: 21px; opacity: 0; transition: opacity .15s; }
 .note:hover .grip, .note.selected .grip { opacity: .45; }
+.note-handle .note-download { width: 28px; height: 28px; min-height: 28px; padding: 4px; flex-shrink: 0; background: transparent; }
+.note-handle .note-download:hover { background: var(--hover); }
 .note textarea, .note-content { display: block; width: 100%; flex: 1; min-height: 0; padding: 4px 16px 8px; resize: none; border: none; background: transparent; color: inherit; font-size: 16px; line-height: 1.65; letter-spacing: -.25px; scrollbar-width: thin; scrollbar-color: var(--paper-line) transparent; overflow: auto; }
 .note-content { white-space: pre-wrap; overflow-wrap: anywhere; user-select: none; }
 .note-content.markdown-body { white-space: normal; }
@@ -220,6 +222,9 @@ button:not(:disabled) { cursor: pointer; }
 .workspace-dialog h3 { margin: 4px 0; font-size: 13px; font-weight: 500; color: var(--muted); }
 .board-list-item { width: 100%; justify-content: flex-start; text-align: left; min-height: 72px; padding: 10px; background: var(--canvas); border: 1px solid var(--line); gap: 12px; border-radius: 12px; }
 .board-list-item.current-board { border-color: var(--accent); background: var(--control); }
+.board-list-item { position: relative; overflow: hidden; }
+.board-storage { position: absolute; inset: auto 0 0; height: 3px; background: var(--line); }
+.board-storage > span { display: block; height: 100%; background: var(--good); transition: width .2s; }
 .dialog-heading, .board-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .dialog-heading > .button, .board-section-heading > .button { min-height: 32px; width: 32px; padding: 6px; }
 .board-section-heading { margin-inline: calc(-1 * var(--dialog-padding)); padding: 12px var(--dialog-padding) 0; border-top: 1px solid var(--line); }
@@ -233,8 +238,8 @@ button:not(:disabled) { cursor: pointer; }
 .board-entry-status { display: flex; flex: 0 0 20px; justify-content: center; color: var(--muted); }
 .current-board .board-entry-status { color: var(--accent); }
 .owned-board-row { position: relative; }
-.owned-board-row .board-list-item { padding-right: 47px; }
-.board-delete-action { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); width: 32px; min-height: 32px; padding: 6px; color: var(--muted); }
+.owned-board-row .board-list-item { padding-right: 59px; }
+.board-delete-action { position: absolute; right: 20px; top: 50%; transform: translateY(-50%); width: 32px; min-height: 32px; padding: 6px; color: var(--muted); }
 .board-delete-action:not(:disabled):active { transform: translateY(-50%); }
 .board-delete-action:hover, .danger-button { color: var(--danger); background: var(--error-surface); }
 .board-list-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

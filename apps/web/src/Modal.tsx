@@ -27,7 +27,7 @@ export function Modal({ open, close, closed, label, children, className = '' }: 
     onCancel={event => { event.preventDefault(); close(); }}
     onPointerDown={event => { outside.current = event.target === event.currentTarget && isOutside(event); }}
     onClick={event => { if (outside.current && event.target === event.currentTarget && isOutside(event)) close(); outside.current = false; }}>
-    <div className="dialog-heading"><h2>{label}</h2><Button icon="close" label="Закрыть модалку" onClick={close} /></div>
+    <div className="dialog-heading"><h2>{label}</h2><Button icon="close" label="Закрыть модалку" tooltip={false} onClick={close} /></div>
     {children}
   </dialog>;
 }
