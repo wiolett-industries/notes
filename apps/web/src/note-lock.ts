@@ -1,6 +1,7 @@
 import { noteContentSchema, type LockKeys, type NoteData, type Envelope } from '@quiet/shared';
 import { deriveKey, toBase64, fromBase64 } from './crypto';
 import { mentionIds } from './markdown';
+import { t } from './locale';
 
 const encoder = new TextEncoder();
 const domain = 'notes/note-lock/private-key/v1';
@@ -25,6 +26,7 @@ export async function createLockKeys(prf: ArrayBuffer, accountId: string): Promi
 }
 export async function sealNote(note: NoteData, keys: LockKeys, accountId: string): Promise<NoteData> {
   if (note.sealed) return note;
+  if (note.textStyle) throw new Error(t('Текстовый блок нельзя заблокировать.'));
   const publicKey = await crypto.subtle.importKey('spki', fromBase64(keys.publicKey), { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
   const rawKey = crypto.getRandomValues(new Uint8Array(32));
   const plaintext = encoder.encode(JSON.stringify(noteContentSchema.parse({ title: note.title, text: note.text, image: note.image })));

@@ -403,7 +403,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
       }
       if (!Array.isArray(payload.positions) || payload.positions.length > 10_000) return;
       const ids = new Set(data.ids), notes = new Map(manager.current!.board.notes.map(note => [note.id, note]));
-      const positions = payload.positions.filter(position => ids.has(position.id) && notes.has(position.id) && !notes.get(position.id)!.pinned && [position.x, position.y, position.width, position.height].every(Number.isFinite) && Math.abs(position.x) <= 1e9 && Math.abs(position.y) <= 1e9 && position.width >= 160 && position.width <= 2048 && position.height >= 120 && position.height <= 2048);
+      const positions = payload.positions.filter(position => ids.has(position.id) && notes.has(position.id) && !notes.get(position.id)!.pinned && [position.x, position.y, position.width, position.height].every(Number.isFinite) && Math.abs(position.x) <= 1e9 && Math.abs(position.y) <= 1e9 && position.width >= 160 && position.width <= 2048 && position.height >= (notes.get(position.id)!.textStyle ? 16 : 120) && position.height <= (notes.get(position.id)!.textStyle ? 1e9 : 2048));
       remoteDrags.current.set(data.id, { positions, at: Date.now() }); renderDrags();
     } catch { /* Ignore malformed transient geometry. */ }
   }

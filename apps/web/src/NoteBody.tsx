@@ -7,6 +7,7 @@ import { mentionText, renderMarkdown, toggleMarkdownTask } from './markdown';
 type Props = {
   note: NoteData; notes: (Pick<NoteData, 'id' | 'title'> & { group?: boolean })[]; editing: boolean; busy: boolean; editable?: boolean;
   change: (text: string) => void; edit: () => void; done: () => void; follow: (id: string) => void;
+  resize?: (height: number) => void;
 };
 type Completion = { start: number; end: number; query: string };
 function completion(input: HTMLTextAreaElement): Completion | null {
@@ -41,14 +42,31 @@ export function markdownShortcut(text: string, start: number, end: number, code:
   }
   return { text: text.slice(0, start) + before + selected + after + text.slice(end), start: start + before.length, end: end + before.length };
 }
-export function NoteBody({ note, notes, editing, busy, editable = false, change, edit, done, follow }: Props) {
+export function NoteBody({ note, notes, editing, busy, editable = false, change, edit, done, follow, resize }: Props) {
   const input = useRef<HTMLTextAreaElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const resizeRef = useRef(resize); resizeRef.current = resize;
   const [mention, setMention] = useState<Completion | null>(null);
   const [active, setActive] = useState(0);
   const [place, setPlace] = useState<{ x: number; y: number; above: boolean }>({ x: 8, y: 36, above: false });
   const composing = useRef(false);
   const tasksEditable = editable && !busy && !note.sealed && !note.pinned;
   const html = useMemo(() => renderMarkdown(note.text, notes, tasksEditable), [note.text, notes, tasksEditable]);
+  useLayoutEffect(() => {
+    if (!note.textStyle || note.sealed) return;
+    const element = editing ? input.current : content.current;
+    if (!element) return;
+    const measure = () => {
+      if (editing && input.current) {
+        input.current.style.height = '0px';
+        input.current.style.height = `${input.current.scrollHeight}px`;
+      }
+      resizeRef.current?.(Math.max(16, Math.ceil(element.offsetHeight + 2)));
+    };
+    measure();
+    const observer = new ResizeObserver(measure); observer.observe(element);
+    return () => observer.disconnect();
+  }, [editing, html, note.textStyle, note.width]);
   const candidates = mention ? notes.filter(n => n.id !== note.id && (n.title || t("Заметка")).toLocaleLowerCase().includes(mention.query)).slice(0, 8) : [];
   useLayoutEffect(() => { if (editing) input.current?.focus({ preventScroll: true }); else setMention(null); }, [editing]);
   function inspect() {
@@ -79,7 +97,7 @@ export function NoteBody({ note, notes, editing, busy, editable = false, change,
     const value = mentionText(target) + ' ';
     apply({ text: text.slice(0, mention.start) + value + text.slice(mention.end), start: mention.start + value.length, end: mention.start + value.length });
   }
-  if (!editing) return <div className="note-content markdown-body" dangerouslySetInnerHTML={{ __html: html }}
+  if (!editing) return <div ref={content} className="note-content markdown-body" dangerouslySetInnerHTML={{ __html: html }}
     onPointerDown={e => { if ((e.target as Element).closest('a, .task-checkbox')) e.stopPropagation(); }}
     onClick={e => {
       if ((e.target as Element).closest('.task-checkbox')) { e.stopPropagation(); return; }

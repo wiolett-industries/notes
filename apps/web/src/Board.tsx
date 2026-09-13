@@ -1,6 +1,6 @@
 import { boardModeShortcut } from './board-hotkeys';
 import { t, quotaMessage, localizeError, countLabel, isStorageLimit } from './locale';
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
 import { colors, GRID_SIZE, MAX_BOARD_BYTES, type BoardData, type NoteData, type NoteColor, type ConnectionData, type GroupData } from '@quiet/shared';
 import { Button, Icon } from './ui';
@@ -16,11 +16,12 @@ import { NoteBody } from './NoteBody';
 import { mentionConnections, mentionIds } from './markdown';
 import './board-cursors.css';
 import { participantColor as peerColor } from './participant-color';
+import { alignmentGuides, type GuideLine } from './geometry';
 
 const labels: Record<NoteColor, string> = { sand: t("Песочный"), sage: t("Шалфей"), rose: t("Розовый"), lavender: t("Лавандовый"), sky: t("Голубой") };
 type DragPosition = { id: string; x: number; y: number; width: number; height: number };
 type Props = { board: BoardData; onChange: (board: BoardData) => void; onStorageLimit?: () => void; onImportBatch?: () => Promise<boolean>; locked?: boolean; noteBusy?: string | null; onToggleLock: (id: string) => Promise<void>; actions?: ComponentChildren; clipboardKey: CryptoKey; accountId: string; interactionBlocked?: boolean; role?: 'owner' | 'editor' | 'viewer'; publicView?: boolean; peers?: { id: string; uid: string; role: string; color?: number; x: number; y: number; selection?: string[] }[]; onCursor?: (point: Point | null) => void; onSelection?: (ids: string[]) => void; onDrag?: (positions: DragPosition[] | null) => void; dragPreviews?: Record<string, Omit<DragPosition, 'id'>> };
-type Gesture = { kind: 'pan' | 'note' | 'resize' | 'connect' | 'selection' | 'group'; pointer: number; start: Point; camera: BoardData['camera']; note?: NoteData; edge?: string; moved?: NoteData[]; bounds?: ReturnType<typeof groupBounds>; selection?: string[]; group?: string; speedSample?: Point & { time: number }; fastSamples?: number; fastDistance?: number; detached?: Map<string, string> };
+type Gesture = { axis?: 'x' | 'y'; kind: 'pan' | 'note' | 'resize' | 'connect' | 'selection' | 'group'; pointer: number; start: Point; camera: BoardData['camera']; note?: NoteData; edge?: string; moved?: NoteData[]; bounds?: ReturnType<typeof groupBounds>; selection?: string[]; group?: string; speedSample?: Point & { time: number }; fastSamples?: number; fastDistance?: number; detached?: Map<string, string> };
 type Draft = { source: string; point: Point; target?: string };
 export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch, locked = false, noteBusy = null, onToggleLock, actions, clipboardKey, accountId, interactionBlocked = false, role = 'owner', publicView = false, peers = [], onCursor, onSelection, onDrag, dragPreviews }: Props) {
   const board = incoming;
@@ -84,6 +85,8 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
   const [clipboardWorking, setClipboardWorking] = useState(false);
   const lastPaste = useRef({ signature: '', count: 0 });
   const [dragging, setDragging] = useState(false);
+  const [axis, setAxis] = useState<'x' | 'y' | null>(null);
+  const guideId = useId();
   const [notice, setNotice] = useState('');
   useEffect(() => { if (isStorageLimit(notice) && onStorageLimit) { onStorageLimit(); setNotice(''); } }, [notice]);
   const [lastDeleted, setLastDeleted] = useState<{ id: string; notes: NoteData[]; connections: ConnectionData[]; groups: GroupData[] } | null>(null);
@@ -420,7 +423,15 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
   useEffect(() => {
     const el = root.current!;
     function wheel(e: WheelEvent) {
-      if (locked || (e.target as HTMLElement).closest('textarea, input, .floating, .note-tools')) return;
+      const target = e.target as HTMLElement;
+      if (locked || target.closest('textarea, input, .floating, .note-tools, dialog')) return;
+      if (!e.ctrlKey && !e.metaKey) {
+        const content = target.closest<HTMLElement>('.note-content');
+        const nested = target.closest<HTMLElement>('.note-content pre, .note-content table');
+        // Rendered Markdown owns wheel input just like the textarea. Keep it
+        // inside the note at scroll boundaries instead of moving the canvas.
+        if ([nested, content].some(element => element && (element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth))) return;
+      }
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) zoomTo(current.current.camera.zoom * Math.exp(-e.deltaY * .008), local({ x: e.clientX, y: e.clientY }));
       else { const old = current.current.camera; const factor = e.deltaMode === 1 ? 16 : 1; camera({ ...old, x: old.x - e.deltaX * factor, y: old.y - e.deltaY * factor }); }
@@ -491,8 +502,11 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
       if ((e.key === 'Delete' || e.key === 'Backspace') && (selectedNotes().length || selectedEdge)) { e.preventDefault(); if (selectedEdge) removeEdge(selectedEdge); else remove(selectedNotes()); }
       if (e.key === '0' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); fit(); }
     }
-    function up(e: KeyboardEvent) { if (e.code === 'Space') setSpace(false); }
-    function blur() { setSpace(false); pointers.current.clear(); gesture.current = null; pinch.current = null; setDragging(false); endDragPreview(); }
+    function up(e: KeyboardEvent) {
+      if (e.code === 'Space') setSpace(false);
+      if (e.key === 'Shift' && !e.shiftKey) { if (gesture.current) delete gesture.current.axis; setAxis(null); }
+    }
+    function blur() { setSpace(false); setAxis(null); pointers.current.clear(); gesture.current = null; pinch.current = null; setDragging(false); endDragPreview(); }
     window.addEventListener('keydown', down); window.addEventListener('keyup', up); window.addEventListener('blur', blur);
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', blur); };
   }, [locked, selected, selectedEdge, selectedIds, selectedGroup, noteBusy, mode, interactionBlocked, role, publicView, previewId]);
@@ -564,7 +578,14 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
     const g = gesture.current;
     if (!g || g.pointer !== e.pointerId) return;
     if (access.current === 'viewer' && g.kind !== 'pan' && g.kind !== 'selection') return;
-    const dx = e.clientX - g.start.x, dy = e.clientY - g.start.y;
+    let dx = e.clientX - g.start.x, dy = e.clientY - g.start.y;
+    if (g.kind === 'note' || g.kind === 'group') {
+      if (e.shiftKey) {
+        g.axis ??= Math.abs(dx) >= Math.abs(dy) ? 'x' : 'y';
+        setAxis(g.axis);
+        if (g.axis === 'x') dy = 0; else dx = 0;
+      } else { delete g.axis; setAxis(null); }
+    }
     if (g.kind === 'selection') {
       if (Math.hypot(e.clientX - g.start.x, e.clientY - g.start.y) < 3) return;
       const a = world(g.start), b = world({ x: e.clientX, y: e.clientY });
@@ -580,11 +601,11 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
       if (!active || !canMove(active)) return;
       const note = g.note;
       const right = snap(note.x + note.width), bottom = snap(note.y + note.height);
-      let x = snap(note.x), y = snap(note.y), width = snap(note.width), height = snap(note.height);
+      let x = snap(note.x), y = snap(note.y), width = snap(note.width), height = note.textStyle ? active.height : snap(note.height);
       if (g.edge.includes('e')) width = clamp(snap(note.width + dx / g.camera.zoom), 160, 2048);
-      if (g.edge.includes('s')) height = clamp(snap(note.height + dy / g.camera.zoom), 120, 2048);
+      if (!note.textStyle && g.edge.includes('s')) height = clamp(snap(note.height + dy / g.camera.zoom), 120, 2048);
       if (g.edge.includes('w')) { x = clamp(snap(note.x + dx / g.camera.zoom), right - 2048, right - 160); width = right - x; }
-      if (g.edge.includes('n')) { y = clamp(snap(note.y + dy / g.camera.zoom), bottom - 2048, bottom - 120); height = bottom - y; }
+      if (!note.textStyle && g.edge.includes('n')) { y = clamp(snap(note.y + dy / g.camera.zoom), bottom - 2048, bottom - 120); height = bottom - y; }
       patch(note.id, { x: clamp(x, -1e9, 1e9), y: clamp(y, -1e9, 1e9), width, height });
       previewDrag([note.id]);
     } else if ((g.kind === 'note' || g.kind === 'group') && g.moved?.length) {
@@ -622,6 +643,7 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
     else camera({ ...g.camera, x: g.camera.x + dx, y: g.camera.y + dy });
   }
   function pointerUp(e: PointerEvent) {
+    setAxis(null);
     endDragPreview();
     if (gesture.current?.kind === 'connect' && draftRef.current && e.type !== 'pointercancel') {
       const value = draftRef.current;
@@ -660,6 +682,16 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
   }, [board.notes, dragPreviews]);
   const visibleNotes = visualNotes.filter(note => retainedNotes.has(note.id) || intersects(note, viewport));
   const groupRects = useMemo(() => groupBounds(board.groups, visualNotes), [board.groups, visualNotes]);
+  const moving = gesture.current;
+  const guideTarget = dragging && (moving?.kind === 'note' || moving?.kind === 'group')
+    ? moving.group ? groupRects.find(group => group.id === moving.group) : visualNotes.find(note => note.id === moving.note?.id) : undefined;
+  const guides: GuideLine[] = guideTarget ? alignmentGuides(guideTarget, visualNotes, new Set(moving?.moved?.map(note => note.id)), cam.zoom) : [];
+  if (guideTarget && axis) {
+    const extension = 100 / cam.zoom, middle = center(guideTarget);
+    guides.unshift(axis === 'x'
+      ? { x1: guideTarget.x - extension, y1: middle.y, x2: guideTarget.x + guideTarget.width + extension, y2: middle.y }
+      : { x1: middle.x, y1: guideTarget.y - extension, x2: middle.x, y2: guideTarget.y + guideTarget.height + extension });
+  }
   const visibleGroups = groupRects.filter(group => group.id === selectedGroup || group.id === editingGroup || group.id === gesture.current?.group || intersects(group, viewport));
   const connectionEndpoints = useMemo(() => [...groupRects, ...visualNotes], [groupRects, visualNotes]);
   const allConnections = useMemo(() => [...board.connections, ...mentionConnections(board.notes, board.groups)], [board.connections, board.notes, board.groups]);
@@ -675,6 +707,15 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
     onDblClick={e => { const target = document.elementFromPoint(e.clientX, e.clientY); if (target?.closest('dialog, .floating, .note-tools')) return; const imageNote = target?.closest('.note-image')?.closest<HTMLElement>('[data-note]'); if (imageNote && mode !== 'connect') { setPreviewId(imageNote.dataset.note!); return; } if ((mode === 'select' || mode === 'group') && !e.composedPath().some(target => target instanceof Element && target.matches('[data-note], .floating, .connections, .group-label'))) add(local({ x: e.clientX, y: e.clientY })); }}>
     <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif" multiple hidden onChange={e => void addImages([...(e.currentTarget.files ?? [])])} />
     <div className={`world ${cameraFocusing ? 'camera-focusing' : ''}`} style={{ transform: `translate(${cam.x}px, ${cam.y}px) scale(${cam.zoom})` }}>
+      {guides.length > 0 && <svg className="drag-guides" width="1" height="1" aria-hidden="true">
+        {guides.map((line, index) => {
+          const id = `${guideId}-${index}`, fade = Math.min(.45, 100 / cam.zoom / Math.hypot(line.x2 - line.x1, line.y2 - line.y1));
+          return <g key={index}><defs><linearGradient id={id} gradientUnits="userSpaceOnUse" {...line}>
+            <stop offset="0" stop-color="var(--accent)" stop-opacity="0" /><stop offset={fade} stop-color="var(--accent)" />
+            <stop offset={1 - fade} stop-color="var(--accent)" /><stop offset="1" stop-color="var(--accent)" stop-opacity="0" />
+          </linearGradient></defs><line {...line} stroke={`url(#${id})`} stroke-width="1" stroke-dasharray="5 5" vector-effect="non-scaling-stroke" /></g>;
+        })}
+      </svg>}
       {visibleGroups.map(group => <section key={group.id} data-group={group.id} className={`group-frame ${selectedGroup === group.id ? 'selected' : ''} ${draft?.target === group.id ? 'connection-target' : ''}`} style={{ left: group.x, top: group.y, width: group.width, height: group.height }}>
         {mode === 'connect' && ['top', 'right', 'bottom', 'left'].map(side => <span className={`group-border group-border-${side}`} aria-hidden="true" />)}
         <div className="group-label" onDblClick={e => { e.stopPropagation(); if (canGroup(group.noteIds) && mode !== 'connect' && !hand) { editGroup(group.id); requestAnimationFrame(() => root.current?.querySelector<HTMLInputElement>(`[data-group="${group.id}"] input`)?.focus({ preventScroll: true })); } }}>
@@ -686,7 +727,7 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
         toggleStyle={id => update({ ...current.current, connections: current.current.connections.map(edge => edge.id === id ? { ...edge, style: edge.style === 'dashed' ? 'solid' : 'dashed' } : edge) })}
         select={id => { selectEdge(id); select(null); setEditing(null); }} edit={id => { if (access.current !== 'viewer') editEdge(id); }} remove={removeEdge}
         change={(id, label) => update({ ...current.current, connections: current.current.connections.map(edge => edge.id === id ? { ...edge, label } : edge) })} />
-      {visibleNotes.map(note => <article key={note.id} data-note={note.id} className={`note pigment-${note.color} ${remoteSelections.has(note.id) ? 'remote-selected' : ''} ${note.textStyle ? 'text-only-note' : ''} ${note.pinned ? 'pinned-note' : ''} ${note.kind === 'image' ? 'image-note' : ''} ${note.sealed ? 'sealed-note' : ''} ${selectedSet.has(note.id) ? 'multi-selected' : ''} ${selected === note.id ? 'selected' : ''} ${draft?.target === note.id ? 'connection-target' : ''} ${draft?.source === note.id ? 'connection-source' : ''}`} style={{ transform: `translate(${note.x}px, ${note.y}px)`, width: note.width, height: note.height, '--peer-color': remoteSelections.get(note.id)?.color, '--text-size': `${[16, 36, 28, 22][note.textStyle?.level ?? 0]}px`, '--text-weight': note.textStyle?.bold ? 700 : 400, '--text-style': note.textStyle?.italic ? 'italic' : 'normal', '--text-decoration': note.textStyle?.underline ? 'underline' : 'none' }} onFocusIn={() => { if (!publicView) select(note.id); }}>
+      {visibleNotes.map(note => <article key={note.id} data-note={note.id} className={`note pigment-${note.color} ${remoteSelections.has(note.id) ? 'remote-selected' : ''} ${note.textStyle ? 'text-only-note' : ''} ${note.pinned ? 'pinned-note' : ''} ${note.kind === 'image' ? 'image-note' : ''} ${note.sealed ? 'sealed-note' : ''} ${selectedSet.has(note.id) ? 'multi-selected' : ''} ${selected === note.id ? 'selected' : ''} ${draft?.target === note.id ? 'connection-target' : ''} ${draft?.source === note.id ? 'connection-source' : ''}`} style={{ transform: `translate(${note.x}px, ${note.y}px)`, width: note.width, height: note.height, '--peer-color': remoteSelections.get(note.id)?.color, '--text-size': `${[16, 36, 28, 22][note.textStyle?.level ?? 0]}px`, '--text-weight': note.textStyle?.bold ? 700 : 400, '--text-style': note.textStyle?.italic ? 'italic' : 'normal', '--text-align': note.textStyle?.align ?? 'left', '--text-decoration': note.textStyle?.underline ? 'underline' : 'none' }} onFocusIn={() => { if (!publicView) select(note.id); }}>
         {!note.textStyle && <div className="note-handle" aria-label={t("Заголовок заметки")}>
           {canEdit(note) && editing?.id === note.id && editing.field === 'title' ? <input className="note-title" aria-label={t("Название заметки")} value={note.title} maxLength={240} readOnly={noteBusy === note.id} onInput={e => patch(note.id, { title: e.currentTarget.value })} onBlur={() => setEditing(null)} onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') { e.stopPropagation(); setEditing(null); } }} /> : <span className="note-title" onDblClick={e => { e.stopPropagation(); startEditing(note.id, 'title'); }}>{note.title || t("Заметка")}</span>}
           {note.kind === 'image' && note.image && !note.sealed && <Button className="note-download" icon="download" label={t("Скачать изображение")} onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); const link = document.createElement('a'); link.href = note.image!; const extension = /^data:image\/(png|jpeg|webp|gif|avif);/.exec(note.image!)?.[1] ?? 'webp'; link.download = `${(note.title || 'image').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/\.(png|jpe?g|webp|gif|avif)$/i, '')}.${extension === 'jpeg' ? 'jpg' : extension}`; document.body.append(link); link.click(); link.remove(); }} />}
@@ -696,20 +737,21 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
           <div className="sealed-placeholder" aria-hidden="true"><i /><i /><i /><i /><i /></div>
           <Button className="unseal-button" icon={noteBusy === note.id ? undefined : 'lock'} label={t("Разблокировать заметку")} disabled={role !== 'owner' || Boolean(noteBusy) || clipboardWorking} onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={() => { if (access.current === 'owner') void onToggleLock(note.id); }}>{noteBusy === note.id && <span className="spinner" />}</Button>
         </div> : <>
-        {note.kind === 'image' ? <div className="note-image" onDblClick={event => { event.stopPropagation(); if (mode !== 'connect' && !note.sealed) setPreviewId(note.id); }}><img src={note.image} alt={note.title} draggable={false} /></div> : <NoteBody note={note} notes={mentionCatalog} editable={canEdit(note)} editing={canEdit(note) && editing?.id === note.id && editing.field === 'text'} busy={noteBusy === note.id} change={text => patch(note.id, { text })} edit={() => startEditing(note.id, 'text')} done={() => setEditing(null)} follow={focusNote} />}
+        {note.kind === 'image' ? <div className="note-image" onDblClick={event => { event.stopPropagation(); if (mode !== 'connect' && !note.sealed) setPreviewId(note.id); }}><img src={note.image} alt={note.title} draggable={false} /></div> : <NoteBody note={note} notes={mentionCatalog} editable={canEdit(note)} editing={canEdit(note) && editing?.id === note.id && editing.field === 'text'} busy={noteBusy === note.id} change={text => patch(note.id, { text })} edit={() => startEditing(note.id, 'text')} done={() => setEditing(null)} follow={focusNote} resize={height => { if (note.textStyle && !note.pinned && !note.sealed && canEdit(note) && note.height !== height) patch(note.id, { height }); }} />}
         {note.kind === 'text' && !note.textStyle && <div className="note-footer"><span>{note.text.length ? countLabel('characters', note.text.length) : ''}</span></div>}
         </>}
         <div className="note-tools" aria-label={t("Параметры заметки")}>
           {note.textStyle && !note.sealed && <>
             {[0, 1, 2, 3].map(level => <Button disabled={!canEdit(note)} aria-pressed={note.textStyle!.level === level} className={note.textStyle!.level === level ? 'pin-active' : ''} label={level ? `H${level}` : t('Обычный текст')} onClick={() => patch(note.id, { textStyle: { ...note.textStyle!, level } })}>{level ? `H${level}` : t('Обычный')}</Button>)}
+            <Button icon="align-center" label={t("Текст по центру")} disabled={!canEdit(note)} aria-pressed={note.textStyle.align === 'center'} className={note.textStyle.align === 'center' ? 'pin-active' : ''} onClick={() => patch(note.id, { textStyle: { ...note.textStyle!, align: note.textStyle!.align === 'center' ? 'left' : 'center' } })} />
             {(['bold', 'italic', 'underline'] as const).map(style => <Button icon={style} label={t(style === 'bold' ? 'Жирный' : style === 'italic' ? 'Курсив' : 'Подчёркнутый')} disabled={!canEdit(note)} aria-pressed={note.textStyle![style]} className={note.textStyle![style] ? 'pin-active' : ''} onClick={() => patch(note.id, { textStyle: { ...note.textStyle!, [style]: !note.textStyle![style] } })} />)}
           </>}
           {note.kind === 'text' && !note.textStyle && !note.sealed && <div className="swatches">{colors.map(color => <button type="button" className={`swatch pigment-${color}`} aria-label={labels[color]} data-tooltip={labels[color]} disabled={!canEdit(note) || noteBusy === note.id} aria-pressed={note.color === color} onClick={() => patch(note.id, { color })}>{note.color === color && <Icon name="check" size={12} />}</button>)}</div>}
-          {!note.sealed && <Button icon="lock" label={t("Заблокировать заметку")} disabled={role !== 'owner' || Boolean(noteBusy) || clipboardWorking} onClick={() => { if (access.current !== 'owner') return; setEditing(null); setLastDeleted(null); gesture.current = null; void onToggleLock(note.id); }} />}
+          {!note.sealed && !note.textStyle && <Button icon="lock" label={t("Заблокировать заметку")} disabled={role !== 'owner' || Boolean(noteBusy) || clipboardWorking} onClick={() => { if (access.current !== 'owner') return; setEditing(null); setLastDeleted(null); gesture.current = null; void onToggleLock(note.id); }} />}
           <Button icon={note.pinned ? 'unpin' : 'pin'} label={note.pinned ? t("Снять фиксацию заметки") : t("Зафиксировать заметку")} aria-pressed={Boolean(note.pinned)} className={note.pinned ? 'pin-active' : ''} disabled={role !== 'owner' || noteBusy === note.id} onClick={() => { if (access.current !== 'owner') return; gesture.current = null; patch(note.id, { pinned: !note.pinned }); }} />
           <Button icon="trash" label={t("Удалить заметку")} className="delete-note" disabled={!canEdit(note) || noteBusy === note.id} onClick={() => remove(note.id)} />
         </div>
-        {canMove(note) && (mode === 'select' || mode === 'group') && ['n', 'e', 's', 'w', 'ne', 'se', 'sw', 'nw'].map(edge => <span className={`resize-handle resize-${edge}`} data-resize={edge} aria-hidden="true" />)}
+        {canMove(note) && (mode === 'select' || mode === 'group') && (note.textStyle ? ['e', 'w'] : ['n', 'e', 's', 'w', 'ne', 'se', 'sw', 'nw']).map(edge => <span className={`resize-handle resize-${edge}`} data-resize={edge} aria-hidden="true" />)}
       </article>)}
       {visibleNotes.map(note => {
         const remote = remoteSelections.get(note.id);

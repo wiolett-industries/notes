@@ -3,6 +3,25 @@ import { GRID_SIZE, type ConnectionData, type NoteData, type GroupData, type Boa
 export type Point = { x: number; y: number };
 export type Rect = Point & { width: number; height: number };
 export type Endpoint = Rect & { id: string };
+export type GuideLine = { x1: number; y1: number; x2: number; y2: number };
+export function alignmentGuides(source: Rect, candidates: Endpoint[], excluded: Set<string>, zoom: number): GuideLine[] {
+  let nearest: Endpoint | undefined, distance = (160 / zoom) ** 2;
+  for (const candidate of candidates) {
+    if (excluded.has(candidate.id)) continue;
+    const dx = Math.max(0, source.x - candidate.x - candidate.width, candidate.x - source.x - source.width);
+    const dy = Math.max(0, source.y - candidate.y - candidate.height, candidate.y - source.y - source.height);
+    const next = dx * dx + dy * dy;
+    if (next < distance) { nearest = candidate; distance = next; }
+  }
+  if (!nearest) return [];
+  const lines: GuideLine[] = [], tolerance = 3 / zoom, extension = 24 / zoom;
+  for (const fraction of [0, .5, 1]) {
+    const x = nearest.x + nearest.width * fraction, y = nearest.y + nearest.height * fraction;
+    if ([0, .5, 1].some(part => Math.abs(source.x + source.width * part - x) <= tolerance)) lines.push({ x1: x, x2: x, y1: Math.min(source.y, nearest.y) - extension, y2: Math.max(source.y + source.height, nearest.y + nearest.height) + extension });
+    if ([0, .5, 1].some(part => Math.abs(source.y + source.height * part - y) <= tolerance)) lines.push({ y1: y, y2: y, x1: Math.min(source.x, nearest.x) - extension, x2: Math.max(source.x + source.width, nearest.x + nearest.width) + extension });
+  }
+  return lines;
+}
 type Side = 'left' | 'right' | 'top' | 'bottom';
 type Port = Point & { side: Side };
 export const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));

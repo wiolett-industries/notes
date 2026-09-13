@@ -1,5 +1,7 @@
 /** UI copy only. Never pass board content or loaded titles to this catalog. */
 export const catalog = {
+  "Текст по центру": "Center text",
+  "Текстовый блок нельзя заблокировать.": "Text blocks cannot be locked.",
   "Загрузка прервана.": "Upload interrupted.",
   "Сервер занят загрузкой. Повторите попытку.": "The server is busy uploading. Try again.",
   "Для удаления участника обновите приложение.": "Update the app to remove a participant.",

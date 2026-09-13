@@ -20,18 +20,19 @@ export const noteContentSchema = z.object({
 export const sealedNoteSchema = z.object({ wrappedKey: base64url.max(800), content: envelopeSchema, visibleTitle: z.boolean().optional(), bindingId: z.string().uuid().optional() }).strict();
 export const lockKeysSchema = z.object({ publicKey: base64url.max(2000), privateKey: envelopeSchema }).strict();
 export const noteSchema = z.object({
-  textStyle: z.object({ level: z.number().int().min(0).max(3), bold: z.boolean(), italic: z.boolean(), underline: z.boolean() }).strict().optional(),
+  textStyle: z.object({ level: z.number().int().min(0).max(3), bold: z.boolean(), italic: z.boolean(), underline: z.boolean(), align: z.enum(['left', 'center']).optional() }).strict().optional(),
   id: z.string().uuid(), x: coordinate, y: coordinate,
   text: z.string().max(MAX_NOTE_TEXT_LENGTH), color: z.enum(colors),
   title: z.string().max(240).default('Заметка'),
   kind: z.enum(['text', 'image']).default('text'),
   width: z.number().min(160).max(2048).default(272),
-  height: z.number().min(120).max(2048).default(248),
+  height: z.number().min(16).max(1e9).default(248),
   pinned: z.boolean().default(false),
   mentions: z.array(z.string().uuid()).max(1000).default([]),
   image: z.string().max(4_000_000).regex(/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/).optional(),
   sealed: sealedNoteSchema.optional(),
-}).strict().refine(note => note.sealed ? note.text === '' && note.image === undefined : note.kind !== 'image' || Boolean(note.image), 'Invalid locked note or missing image');
+}).strict().refine(note => note.textStyle ? note.kind === 'text' : note.height >= 120 && note.height <= 2048, 'Invalid note dimensions')
+  .refine(note => note.sealed ? note.text === '' && note.image === undefined : note.kind !== 'image' || Boolean(note.image), 'Invalid locked note or missing image');
 export const connectionSchema = z.object({
   id: z.string().uuid(), source: z.string().uuid(), target: z.string().uuid(),
   label: z.string().max(500).default(''),

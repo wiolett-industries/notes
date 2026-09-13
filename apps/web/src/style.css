@@ -30,11 +30,16 @@ button:not(:disabled) { cursor: pointer; }
 .board.dragging, .board.dragging * { cursor: grabbing !important; user-select: none; }
 .world { position: absolute; top: 0; left: 0; width: 0; height: 0; transform-origin: 0 0; }
 .world.camera-focusing { transition: transform .2s ease-out; }
+.drag-guides { position: absolute; inset: 0; overflow: visible; pointer-events: none; z-index: 4; }
 .note { position: absolute; top: 0; left: 0; display: flex; flex-direction: column; width: 272px; height: 248px; border: 1px solid var(--paper-line); background: var(--paper); color: var(--paper-ink); border-radius: 3px; box-shadow: 0 3px 5px #00000004, 0 12px 28px -15px #00000025; transition: box-shadow .16s; cursor: grab; }
 .note:hover { box-shadow: 0 4px 8px #00000009, 0 15px 30px -12px #00000030; }
 .note.text-only-note, .note.text-only-note:hover { border-color: transparent; background: transparent; box-shadow: none; color: var(--text); }
-.text-only-note .note-content, .text-only-note .note-editor textarea { font-size: var(--text-size); font-weight: var(--text-weight); font-style: var(--text-style); text-decoration: var(--text-decoration); line-height: 1.35; padding: 4px; }
+.text-only-note .note-content, .text-only-note .note-editor textarea { font-size: var(--text-size); font-weight: var(--text-weight); font-style: var(--text-style); text-decoration: var(--text-decoration); text-align: var(--text-align); line-height: 1.35; padding: 4px; }
 .text-only-note .note-content > :first-child { margin-top: 0; }
+.text-only-note .note-content, .text-only-note .note-editor { flex: none; height: auto; }
+.text-only-note .note-content { overflow: visible; }
+.note-tools .button[aria-pressed="true"]:has(+ .button[aria-pressed="true"]) { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.note-tools .button[aria-pressed="true"] + .button[aria-pressed="true"] { border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .note ::selection { background: color-mix(in srgb, var(--paper-ink) 26%, transparent); color: var(--paper-ink); }
 .note .button:not(:disabled):hover, .note .note-tools .button:not(:disabled):hover, .note .note-tools .button.pin-active { background: color-mix(in srgb, var(--paper-ink) 15%, var(--paper)); color: var(--paper-ink); }
 .note.selected { outline: 1.5px solid var(--paper-outline); outline-offset: 3px; z-index: 2; }
@@ -50,6 +55,7 @@ button:not(:disabled) { cursor: pointer; }
 .note-handle .note-download:hover { background: var(--hover); }
 .note textarea, .note-content { display: block; width: 100%; flex: 1; min-height: 0; padding: 4px 16px 8px; resize: none; border: none; background: transparent; color: inherit; font-size: 16px; line-height: 1.65; letter-spacing: -.25px; scrollbar-width: thin; scrollbar-color: var(--paper-line) transparent; overflow: auto; }
 .note-content { white-space: pre-wrap; overflow-wrap: anywhere; user-select: none; }
+.note-content, .note textarea, .markdown-body pre, .markdown-body table { overscroll-behavior: contain; }
 .note-content.markdown-body { white-space: normal; }
 .markdown-body > :first-child { margin-top: 0; }
 .markdown-body > :last-child { margin-bottom: 0; }
