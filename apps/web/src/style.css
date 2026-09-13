@@ -156,8 +156,11 @@ button:not(:disabled) { cursor: pointer; }
 .board:has(.search-popover) .undo-toast { bottom: 158px; }
 .timed-toast { overflow: hidden; padding: 6px; gap: 6px; max-width: min(640px, calc(100vw - 24px)); white-space: pre-line; animation: toast-enter .18s ease-out both; }
 .timed-toast > span:first-child { padding-left: 8px; }
-.key-dialog.image-preview { width: calc(100vw - 32px); max-width: none; height: calc(100dvh - 32px); max-height: none; display: flex; flex-direction: column; }
-.image-preview > img { display: block; width: 100%; min-height: 0; flex: 1; object-fit: contain; cursor: zoom-out; }
+.key-dialog.image-preview { position: fixed; inset: 16px; width: calc(100vw - 32px); max-width: none; height: calc(100dvh - 32px); max-height: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; background: var(--canvas); }
+.image-preview-canvas { position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: grab; user-select: none; }
+.image-preview-canvas.dragging { cursor: grabbing; }
+.image-preview-canvas > img { position: absolute; left: 0; top: 0; display: block; max-width: none; max-height: none; transform-origin: 0 0; pointer-events: none; user-select: none; }
+.image-preview .modal-overlay-close { position: absolute; z-index: 2; top: max(16px, env(safe-area-inset-top)); right: max(16px, env(safe-area-inset-right)); background: var(--surface); box-shadow: 0 2px 12px #0003; }
 .timed-toast > span:first-child { font-size: 13px; }
 .timed-toast.leaving { animation: toast-leave .18s ease-in both; pointer-events: none; }
 .toast-countdown { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--accent); transform-origin: left; animation: toast-time 6s linear forwards; }

@@ -9,7 +9,7 @@ import { clamp, snap, center, prepareConnectionRouting, routePreparedConnections
 import { readImage } from './images';
 import { isTextFile, readTextFile } from './text-files';
 import { UndoToast } from './UndoToast';
-import { Modal } from './Modal';
+import { ImagePreview } from './ImagePreview';
 import { SearchPopover } from './SearchPopover';
 import { CLIPBOARD_PREFIX, copySelection, writeSelection, readSelection, pasteSelection } from './board-clipboard';
 import { NoteBody } from './NoteBody';
@@ -839,9 +839,7 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
         update(cleanGroups({ ...current.current, notes, groups, connections: [...edges.values()].slice(0, 40000) })); setLastDeleted(null);
       }} />}
       {notice && <UndoToast key={notice} message={notice} dismiss={() => setNotice('')} />}
-      <Modal open={Boolean(previewNote?.image)} close={() => setPreviewId(null)} label={previewNote?.title || t('Заметка')} className="image-preview">
-        {previewNote?.image && <img src={previewNote.image} alt={previewNote.title} onClick={() => setPreviewId(null)} />}
-      </Modal>
+      <ImagePreview src={previewNote?.image} title={previewNote?.title} close={() => setPreviewId(null)} />
     </>}
   </div>;
 }

@@ -3,8 +3,8 @@ import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Button } from './ui';
 
-export function Modal({ open, close, closed, label, children, className = '' }: {
-  open: boolean; close: () => void; closed?: () => void; label: string; children: ComponentChildren; className?: string;
+export function Modal({ open, close, closed, label, children, className = '', hideHeading = false }: {
+  open: boolean; close: () => void; closed?: () => void; label: string; children: ComponentChildren; className?: string; hideHeading?: boolean;
 }) {
   const element = useRef<HTMLDialogElement>(null);
   const [leaving, setLeaving] = useState(false);
@@ -28,7 +28,7 @@ export function Modal({ open, close, closed, label, children, className = '' }: 
     onCancel={event => { event.preventDefault(); close(); }}
     onPointerDown={event => { outside.current = event.target === event.currentTarget && isOutside(event); }}
     onClick={event => { if (outside.current && event.target === event.currentTarget && isOutside(event)) close(); outside.current = false; }}>
-    <div className="dialog-heading"><h2>{label}</h2><Button icon="close" label={t("Закрыть модалку")} tooltip={false} onClick={close} /></div>
+    {hideHeading ? <Button className="modal-overlay-close" icon="close" label={t("Закрыть модалку")} tooltip={false} onClick={close} /> : <div className="dialog-heading"><h2>{label}</h2><Button icon="close" label={t("Закрыть модалку")} tooltip={false} onClick={close} /></div>}
     {children}
   </dialog>;
 }
