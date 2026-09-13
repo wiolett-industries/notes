@@ -432,20 +432,29 @@ export function Board({ board: incoming, onChange, onStorageLimit, onImportBatch
         zoomTo(current.current.camera.zoom * Math.exp(-e.deltaY * .008), local({ x: e.clientX, y: e.clientY }));
         return;
       }
-      // A wheel burst belongs to its starting surface, including inertial events.
+      // Start on the hovered surface. Once a note reaches its edge, hand the
+      // remaining gesture to the canvas without allowing a note to recapture it.
       if (now - lastWheel > 220) {
         const candidates = [target.closest<HTMLElement>('.note-content pre, .note-content table'), target.closest<HTMLElement>('.note-content, .note textarea')];
-        owner = candidates.find(element => element && (element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth)) ?? null;
+        owner = candidates.find(element => element && (Math.abs(e.deltaX) > Math.abs(e.deltaY)
+          ? element.scrollWidth > element.clientWidth : element.scrollHeight > element.clientHeight)) ?? null;
       }
       lastWheel = now;
       e.preventDefault();
       const factor = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1;
-      if (owner) {
-        if (owner.isConnected) { owner.scrollLeft += e.deltaX * factor; owner.scrollTop += e.deltaY * factor; }
-      } else {
-        const old = current.current.camera;
-        camera({ ...old, x: old.x - e.deltaX * factor, y: old.y - e.deltaY * factor });
+      let dx = e.deltaX * factor, dy = e.deltaY * factor;
+      if (owner?.isConnected) {
+        const usedX = clamp(dx, -owner.scrollLeft, owner.scrollWidth - owner.clientWidth - owner.scrollLeft);
+        const usedY = clamp(dy, -owner.scrollTop, owner.scrollHeight - owner.clientHeight - owner.scrollTop);
+        owner.scrollLeft += usedX; owner.scrollTop += usedY;
+        const remainingX = dx - usedX, remainingY = dy - usedY;
+        // Trackpad diagonal jitter must not interrupt an ongoing vertical scroll.
+        if (Math.abs(Math.abs(dx) > Math.abs(dy) ? remainingX : remainingY) < 1e-6) return;
+        dx = remainingX; dy = remainingY;
       }
+      owner = null;
+      const old = current.current.camera;
+      camera({ ...old, x: old.x - dx, y: old.y - dy });
     }
     el.addEventListener('wheel', wheel, { passive: false });
     return () => el.removeEventListener('wheel', wheel);
