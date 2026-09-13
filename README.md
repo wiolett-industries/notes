@@ -46,7 +46,7 @@ These methods create separate accounts; they are not interchangeable recovery me
 Notes runs as **one Node.js process** serving the frontend, API, and WebSocket endpoint. No separate database service, Redis, or object-storage service is required.
 
 ```sh
-git clone https://gitlab.wiolett.net/wiolett/notes.git
+git clone https://github.com/wiolett-industries/notes.git
 cd notes
 docker build -t notes .
 
@@ -157,4 +157,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and [the dem
 
 ## License
 
-[MIT](LICENSE) — © 2026 Wiolett and contributors. Third-party dependencies retain their own licenses.
+[MIT](LICENSE) — © Wiolett Industries. Third-party dependencies retain their own licenses.

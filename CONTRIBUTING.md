@@ -4,7 +4,7 @@ Thanks for helping improve Notes. Small, focused changes are welcome.
 
 ## Before starting
 
-Search existing issues and merge requests. For a large feature or a change to the
+Search existing issues and pull requests. For a large feature or a change to the
 encryption protocol, describe the problem and proposed behavior in an issue first.
 Bug reports should include browser/OS versions, clear reproduction steps, and
 whether the board is personal, shared, or public. Use a disposable board to
@@ -25,7 +25,7 @@ npm run dev
 The frontend runs on `http://localhost:5173`; the API and WebSocket server run on
 port 3001. See the [README](README.md#development) for configuration.
 
-Before opening a merge request:
+Before opening a pull request:
 
 ```sh
 npm run typecheck
@@ -46,6 +46,6 @@ can be installed with `npx playwright install chromium`.
 - Preserve domain-separated encryption contexts and backwards compatibility.
 - Cover behavior changes with the smallest useful check, especially permissions,
   file cleanup, and encryption boundaries.
-- Explain what changed, why, and how you verified it in the merge request.
+- Explain what changed, why, and how you verified it in the pull request.
 
 Contributions are licensed under the repository's [MIT License](LICENSE).

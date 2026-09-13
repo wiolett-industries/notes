@@ -2,10 +2,10 @@
 
 ## Reporting a vulnerability
 
-Please report vulnerabilities privately to the project maintainers before
-publishing details. On this repository's GitLab instance, use a **confidential
-issue** when available. If you cannot create one, ask a maintainer for a private
-reporting channel without including exploit details in a public issue.
+Please report vulnerabilities privately through
+[GitHub's private vulnerability reporting](https://github.com/wiolett-industries/notes/security/advisories/new)
+before publishing details. If you cannot use that form, ask a maintainer for a
+private reporting channel without including exploit details in a public issue.
 
 Include the affected commit, a minimal reproduction using disposable accounts,
 the expected and observed behavior, and the potential impact. Never include real
