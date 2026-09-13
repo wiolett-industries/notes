@@ -29,7 +29,7 @@ export function Tooltip() {
       if (event instanceof PointerEvent && event.pointerType === 'touch') return;
       const next = (event.target as Element | null)?.closest<HTMLElement>('[data-tooltip]');
       if (!next || next === target) return;
-      hide(); target = next; timer = setTimeout(show, 400);
+      hide(); target = next; timer = setTimeout(show, 750);
     }
     function leave(event: Event) {
       const related = (event as FocusEvent | PointerEvent).relatedTarget;
