@@ -14,7 +14,7 @@ export function ImagePreview({ src, title, close }: { src?: string; title?: stri
   function fit() {
     const area = canvas.current, img = image.current;
     if (!area || !img?.naturalWidth) return;
-    const scale = Math.min(area.clientWidth / img.naturalWidth, area.clientHeight / img.naturalHeight);
+    const scale = Math.min(1, area.clientWidth / img.naturalWidth, area.clientHeight / img.naturalHeight);
     fittedScale.current = scale;
     move({ scale, x: (area.clientWidth - img.naturalWidth * scale) / 2, y: (area.clientHeight - img.naturalHeight * scale) / 2 });
   }
