@@ -101,9 +101,10 @@ export function mentionText(note: Pick<NoteData, 'id' | 'title'>) {
   return `[@${title}](note:${note.id})`;
 }
 export type MentionConnection = ConnectionData & { mention?: boolean };
-export function mentionConnections(notes: NoteData[]): MentionConnection[] {
-  const ids = new Set(notes.map(note => note.id));
-  return notes.flatMap(note => [...new Set(note.mentions ?? [])].filter(id => id !== note.id && ids.has(id)).map(target => ({
+export function mentionConnections(notes: NoteData[], groups: { id: string; noteIds: string[] }[] = []): MentionConnection[] {
+  const ids = new Set([...notes.map(note => note.id), ...groups.map(group => group.id)]);
+  const parents = new Map(groups.flatMap(group => group.noteIds.map(id => [id, group.id] as const)));
+  return notes.flatMap(note => [...new Set(note.mentions ?? [])].filter(id => id !== note.id && id !== parents.get(note.id) && ids.has(id)).map(target => ({
     id: `mention:${note.id}:${target}`, source: note.id, target, label: '', style: 'dashed' as const, mention: true,
   })));
 }

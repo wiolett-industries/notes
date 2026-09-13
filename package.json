@@ -15,6 +15,7 @@
     "start": "node --env-file-if-exists=.env apps/server/dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
+    "test:cache": "tsx --test tests/board-cache.browser.ts",
     "test:e2e": "playwright test"
   },
   "devDependencies": {

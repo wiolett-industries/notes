@@ -23,7 +23,7 @@ Self-hostable. No email or password required.
 - **Think spatially.** An infinite dotted canvas with grid snapping, resizable notes, groups, and labeled solid or dashed connections.
 - **Write and connect.** Markdown with clickable task lists, formatting shortcuts, board search, and `@` mentions that create connections automatically.
 - **Keep visual references.** Drop in images, move them like notes, and download the stored version from their header.
-- **Work together.** Invite people by UID as editors or viewers. See their cursors, selections, and movements in real time.
+- **Work together.** Invite people using verified profile codes as editors or viewers. See their cursors, selections, and movements in real time.
 - **Control access.** Passkey or generated access-key sign-in, encrypted private boards, pinned notes, and separately locked note contents.
 - **Share deliberately.** Publish a read-only, unencrypted snapshot without giving visitors access to your private board.
 - **Feel at home.** Automatic light/dark themes and English/Russian UI selected from browser language preferences. Each board remembers your camera position locally.
@@ -90,11 +90,11 @@ The toolbar's encrypted export is a per-board backup, not an account recovery me
 
 Private board data is encrypted in the browser. Each board has its own random AES-256 key; notes, positions, groups, and connections are encrypted separately so updates send only changed entities. Image ciphertext is stored as files rather than SQLite blobs.
 
-Inviting someone wraps the board key with that person's RSA-OAEP public key. The server enforces editor/viewer permissions and relays encrypted collaboration messages. Locked note contents use a separate key hierarchy; titles remain visible to board members.
+Inviting someone requires the invitation code from their profile, exchanged through a trusted channel. It includes the UID and public-key fingerprint, which the browser checks before wrapping the board key with RSA-OAEP. Removing a participant rotates the board key and re-encrypts the private board for the remaining verified members. The server enforces editor/viewer permissions and relays encrypted collaboration messages. Locked note contents use a separate key hierarchy; titles remain visible to board members.
 
 **Publishing is an explicit privacy boundary.** A public link serves a plaintext snapshot stored on the server. It does not reveal the live private board, and later edits do not update the snapshot. Disable publishing to remove it from the server; copies already downloaded by visitors cannot be recalled.
 
-Encryption does not hide membership, roles, object sizes, identifiers, revisions, or activity from the server. It also does not protect an unlocked browser from malicious extensions or a compromised application host. Removing a participant blocks future server access but does not rotate the board key or erase data they already received.
+Encryption does not hide membership, roles, object sizes, identifiers, revisions, or activity from the server. It also does not protect an unlocked browser from malicious extensions or a compromised application host. Removing a participant cannot erase data or keys they already received.
 
 Read the [encryption design, key hierarchy, and limitations](docs/encryption.md). Notes has **not undergone an independent security audit**. For vulnerability reports, see [SECURITY.md](SECURITY.md).
 

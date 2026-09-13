@@ -4,6 +4,7 @@ export * from './limits.ts';
 
 export const SESSION_SECONDS = 12 * 60 * 60;
 export const GRID_SIZE = 8;
+export const MAX_NOTE_TEXT_LENGTH = 1_000_000;
 export const PRF_INPUT = 'quiet/board/passkey-prf/v1';
 export const colors = ['sand', 'sage', 'rose', 'lavender', 'sky'] as const;
 export const coordinate = z.number().finite().min(-1e9).max(1e9);
@@ -13,14 +14,15 @@ export const envelopeSchema = z.object({
   ciphertext: base64url.min(22).refine(value => value.length <= MAX_ENCRYPTED_BYTES, 'Encrypted payload exceeds the configured limit.'),
 }).strict();
 export const noteContentSchema = z.object({
-  title: z.string().max(240), text: z.string().max(50_000),
+  title: z.string().max(240), text: z.string().max(MAX_NOTE_TEXT_LENGTH),
   image: z.string().max(4_000_000).regex(/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/).optional(),
 }).strict();
 export const sealedNoteSchema = z.object({ wrappedKey: base64url.max(800), content: envelopeSchema, visibleTitle: z.boolean().optional(), bindingId: z.string().uuid().optional() }).strict();
 export const lockKeysSchema = z.object({ publicKey: base64url.max(2000), privateKey: envelopeSchema }).strict();
 export const noteSchema = z.object({
+  textStyle: z.object({ level: z.number().int().min(0).max(3), bold: z.boolean(), italic: z.boolean(), underline: z.boolean() }).strict().optional(),
   id: z.string().uuid(), x: coordinate, y: coordinate,
-  text: z.string().max(50_000), color: z.enum(colors),
+  text: z.string().max(MAX_NOTE_TEXT_LENGTH), color: z.enum(colors),
   title: z.string().max(240).default('Заметка'),
   kind: z.enum(['text', 'image']).default('text'),
   width: z.number().min(160).max(2048).default(272),

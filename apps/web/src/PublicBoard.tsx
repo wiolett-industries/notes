@@ -24,5 +24,5 @@ export function PublicBoard({ token }: { token: string }) {
     })();
     return () => { flushCameras(); active = false; socket.close(); document.title = 'Notes'; };
   }, [token]);
-  return <main>{board && key ? <Board board={board} onChange={next => { rememberCamera('public', token, next.camera); setBoard({ ...board, camera: next.camera }); }} role="viewer" onToggleLock={async () => {}} clipboardKey={key} accountId={token} actions={<span className="public-board-title">{title}</span>} /> : <div className="login-screen">{error ? <p className="public-error" role="alert">{error}</p> : <Button disabled aria-label={t("Загрузка доски")}><span className="spinner" /></Button>}</div>}</main>;
+  return <main>{board && key ? <Board board={board} onChange={next => { rememberCamera('public', token, next.camera); setBoard({ ...board, camera: next.camera }); }} role="viewer" publicView onToggleLock={async () => {}} clipboardKey={key} accountId={token} actions={<span className="public-board-title">{title}</span>} /> : <div className="login-screen">{error ? <p className="public-error" role="alert">{error}</p> : <Button disabled aria-label={t("Загрузка доски")}><span className="spinner" /></Button>}</div>}</main>;
 }

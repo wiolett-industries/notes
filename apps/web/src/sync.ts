@@ -77,6 +77,9 @@ export class BoardSync {
       }
       this.emit('saved'); return true;
     } catch (error) {
+      // A definitive quota rejection was not committed; retry the latest edits,
+      // not the same oversized mutation after the user deletes content.
+      if (error instanceof ApiError && error.status === 413) this.uncertain = undefined;
       const conflict = error instanceof ApiError && error.status === 409;
       this.blocked = conflict;
       this.emit(conflict ? 'conflict' : 'error', error instanceof Error && !(error instanceof TypeError) && !(error instanceof DOMException) ? localizeError(error) : t("Нет связи с сервером. Изменения остаются в этой вкладке."));

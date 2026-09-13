@@ -1,11 +1,11 @@
 import { t } from './locale';
 import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
-import type { NoteData } from '@quiet/shared';
+import { MAX_NOTE_TEXT_LENGTH, type NoteData } from '@quiet/shared';
 import './task-lists.css';
 import { mentionText, renderMarkdown, toggleMarkdownTask } from './markdown';
 
 type Props = {
-  note: NoteData; notes: Pick<NoteData, 'id' | 'title'>[]; editing: boolean; busy: boolean; editable?: boolean;
+  note: NoteData; notes: (Pick<NoteData, 'id' | 'title'> & { group?: boolean })[]; editing: boolean; busy: boolean; editable?: boolean;
   change: (text: string) => void; edit: () => void; done: () => void; follow: (id: string) => void;
 };
 type Completion = { start: number; end: number; query: string };
@@ -69,7 +69,7 @@ export function NoteBody({ note, notes, editing, busy, editable = false, change,
     mirror.remove();
   }
   function apply(result: { text: string; start: number; end: number }) {
-    if (busy || result.text.length > 50_000) return;
+    if (busy || result.text.length > MAX_NOTE_TEXT_LENGTH) return;
     change(result.text); setMention(null);
     requestAnimationFrame(() => { input.current?.focus({ preventScroll: true }); input.current?.setSelectionRange(result.start, result.end); });
   }
@@ -96,7 +96,7 @@ export function NoteBody({ note, notes, editing, busy, editable = false, change,
     }}
     onDblClick={e => { e.stopPropagation(); if (!(e.target as Element).closest('a, .task-checkbox')) edit(); }} />;
   return <div className="note-editor">
-    <textarea ref={input} aria-label={t("Текст заметки")} maxLength={50_000} value={note.text} spellcheck readOnly={busy}
+    <textarea ref={input} aria-label={t("Текст заметки")} maxLength={MAX_NOTE_TEXT_LENGTH} value={note.text} spellcheck readOnly={busy}
       aria-autocomplete="list" aria-expanded={Boolean(mention)} aria-controls={mention ? `mentions-${note.id}` : undefined}
       aria-activedescendant={mention && candidates.length ? `mention-${note.id}-${candidates[Math.min(active, candidates.length - 1)].id}` : undefined}
       onInput={e => { change(e.currentTarget.value); inspect(); }} onClick={inspect} onSelect={inspect}
@@ -116,7 +116,7 @@ export function NoteBody({ note, notes, editing, busy, editable = false, change,
         if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(); }
       }} />
     {mention && <div id={`mentions-${note.id}`} className={`mention-menu floating ${place.above ? 'above' : ''}`} role="listbox" aria-label={t("Упомянуть заметку")} style={{ left: place.x, top: place.y }} onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onDblClick={e => e.stopPropagation()}>
-      {candidates.length ? candidates.map((target, index) => <button key={target.id} id={`mention-${note.id}-${target.id}`} type="button" role="option" aria-selected={index === active} onClick={() => pick(target)}><span>@</span><span>{target.title || t("Заметка")}</span><small>{target.id.slice(0, 4)}</small></button>) : <span className="mention-empty">{t("Заметок не найдено")}</span>}
+      {candidates.length ? candidates.map((target, index) => <button key={target.id} id={`mention-${note.id}-${target.id}`} type="button" role="option" aria-selected={index === active} onClick={() => pick(target)}><span>@</span><span>{target.title || t("Заметка")}</span><small>{target.group ? t("Группа") : target.id.slice(0, 4)}</small></button>) : <span className="mention-empty">{t("Заметок не найдено")}</span>}
     </div>}
   </div>;
 }

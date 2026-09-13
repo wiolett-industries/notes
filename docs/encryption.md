@@ -78,6 +78,17 @@ When a save fails, new files are removed; after a committed image deletion or
 replacement, obsolete files are unlinked. Startup cleanup also removes orphaned
 files left after interruptions.
 
+New clients stream bounded structural frames instead of serializing a whole
+board into one large JSON string. Encrypted image writes are staged asynchronously
+before the SQLite commit and cleaned up if the operation fails. A disposable
+IndexedDB cache retains ciphertext for the last loaded private board, without
+keys, plaintext, manifests or access policies. On reload the client advertises
+cached entity revisions; the server still authorizes the read and returns the
+current manifest and object set plus changed ciphertext. The client hydrates
+missing envelopes from cache and authenticates the complete result before use.
+An evicted or incomplete cache triggers one full-download retry. Old ciphertext
+in a browser cache is not a substitute for a current authorized server response.
+
 A database backup alone is insufficient: retain the database and image directory
 as one consistent backup. Filesystem allocation slack and the whole SQLite/WAL
 file size are not assigned to an individual user's board quota.
@@ -96,15 +107,28 @@ to pinned or locked entities. Cursor positions, selections, and transient drag
 coordinates are encrypted with the board key before relay. Anonymous public
 visitors are not included in presence.
 
-Recipient public keys are obtained from the server. There is no out-of-band
-fingerprint verification or key-transparency system, so a malicious server could
-substitute a recipient key during an invitation. A shared board key also means
+The browser verifies its directory public key using a random RSA-OAEP challenge
+and its authenticated, non-extractable private key. A mismatched pair is rejected
+before a board key is wrapped; no private JWK components are exported.
+Invitations require a `notes-contact:<UID>:<SHA-256 SPKI fingerprint>` code copied
+from the recipient's profile and exchanged through a trusted channel. The client
+compares the directory key to this fingerprint before wrapping any board key.
+The owner retains each verified recipient key in an account-key-encrypted envelope
+bound to the board and recipient; subsequent role changes and rotations use that
+verified key. Existing memberships remain readable but require verification before
+their keys can be rewrapped. There is no global key-transparency service: accepting
+a code supplied by an attacker still trusts the attacker. A shared board key means
 that authorized members share cryptographic access; editor/viewer write
 restrictions are enforced by the server, not by different encryption keys.
 
-Removing a member stops further access through the server and live connection.
-It does **not** rotate the board key or delete copies the former member has
-already downloaded. Do not treat removal as retroactive cryptographic revocation.
+Removing a member generates a fresh random board key, re-encrypts the complete
+private board and its name, and wraps the replacement key for every remaining
+verified member. The server commits removal, ciphertext and wrapped keys atomically
+under a revision check; a conflict or quota error rolls everything back. Remaining
+clients reload using the replacement key. Removal does not erase copies or old keys
+the former member already downloaded, and an explicitly public snapshot remains
+public until unpublished. Retain backups made before rotation if they are needed;
+their old ciphertext cannot be opened with the new board key alone.
 
 ## Locked notes
 

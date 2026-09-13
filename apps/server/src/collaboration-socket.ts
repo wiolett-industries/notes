@@ -4,17 +4,18 @@ import type { Server as HTTPSServer } from 'node:https';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import { z } from 'zod';
-import { MAX_TRANSFER_BYTES, ChunkReceiver, encodeFrames, base64url, envelopeSchema, type BoardRole, type Envelope } from '@quiet/shared';
+import { MAX_TRANSFER_BYTES, MAX_ENTITIES, ChunkReceiver, encodeSerializedFrames, encodeTreeFrames, transferReservation, base64url, envelopeSchema, type BoardRole, type Envelope } from '@quiet/shared';
 import { CollaborationError } from './collaboration-store.js';
 import type { Store } from './store.js';
 
 const idSchema = base64url.length(43);
 const boardParams = z.object({ boardId: idSchema });
+const loadParams = boardParams.extend({ known: z.array(z.object({ id: idSchema, revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) }).strict()).max(MAX_ENTITIES).optional() }).strict();
 const requestSchema = z.object({ id: z.string().min(1).max(128), method: z.string().min(1).max(64), params: z.unknown() }).strict();
 const MAX_FRAME_BYTES = 512 * 1024;
 const MAX_PENDING_BYTES = 8 * 1024 * 1024;
-type Delivery = { frames: Iterator<string>; bytes: number; allowed: () => boolean; started: boolean };
-type Client = { ws: WebSocket; id: string; hash: string | null; uid: string | null; boardId: string | null; role: BoardRole | null; selection: Envelope | null; alive: boolean; count: number; realtimeCount: number; bytes: number; until: number; receiver: ChunkReceiver; receivingSince: number | null; receiveTimeout: ReturnType<typeof setTimeout> | null; queue: Delivery[]; pendingBytes: number; active: Delivery | null };
+type Delivery = { frames: Iterator<string> | null; bytes: number; allowed: () => boolean; started: boolean };
+type Client = { ws: WebSocket; tree: boolean; id: string; hash: string | null; uid: string | null; boardId: string | null; role: BoardRole | null; selection: Envelope | null; alive: boolean; count: number; realtimeCount: number; bytes: number; until: number; receiver: ChunkReceiver; receivingSince: number | null; receiveTimeout: ReturnType<typeof setTimeout> | null; queue: Delivery[]; pendingBytes: number; active: Delivery | null };
 
 /** Attach to an existing HTTP(S) server. Returns an idempotent, synchronous close function. */
 export function attachCollaboration(server: HTTPServer | HTTPSServer, store: Store, origin: string): () => void {
@@ -36,34 +37,42 @@ export function attachCollaboration(server: HTTPServer | HTTPSServer, store: Sto
     if (!client.active) {
       client.active = client.queue.shift() ?? null;
       if (!client.active) return;
-      client.pendingBytes -= client.active.bytes;
+      client.pendingBytes -= queuedBytes(client.active.bytes);
     }
     const delivery = client.active;
+    if (!delivery.frames) return; // Reserved response is still loading its snapshot.
     // Check again between frames: a revoked member must not finish a queued snapshot.
-    let frame: IteratorResult<string>;
-    try { frame = delivery.frames.next(); }
-    catch { client.ws.close(1009, 'Transfer too large'); return; }
-    if (frame.done) { client.active = null; pump(client); return; }
     if (!delivery.allowed()) {
       if (delivery.started) { client.ws.terminate(); return; }
       client.active = null; pump(client); return;
     }
+    let frame: IteratorResult<string>;
+    try { frame = delivery.frames.next(); }
+    catch { client.ws.close(1009, 'Transfer too large'); return; }
+    if (frame.done) { client.active = null; pump(client); return; }
     delivery.started = true;
     if (client.ws.bufferedAmount > MAX_PENDING_BYTES) { client.ws.terminate(); return; }
     client.ws.send(frame.value, error => {
       if (error) { client.ws.terminate(); return; }
-      pump(client);
+      setImmediate(() => pump(client));
     });
   }
+  function queuedBytes(bytes: number) { return bytes > MAX_PENDING_BYTES ? 0 : bytes; }
   function rawSend(client: Client, payload: unknown, boardId?: string, watched = false, authenticated = true) {
     if (client.ws.readyState !== WebSocket.OPEN) return;
-    const bytes = Buffer.byteLength(JSON.stringify(payload));
+    const loading = payload instanceof Promise;
+    const json = loading || client.tree ? null : JSON.stringify(payload);
+    const bytes = loading ? MAX_TRANSFER_BYTES : client.tree ? transferReservation(payload) : Buffer.byteLength(json!);
     if (bytes > MAX_TRANSFER_BYTES) { client.ws.close(1009, 'Transfer too large'); return; }
-    // One large active snapshot is allowed. Waiting incremental traffic stays bounded.
-    const singleSnapshot = client.queue.length === 0 && (!client.active || client.active.bytes <= MAX_PENDING_BYTES);
-    if (client.pendingBytes + bytes > MAX_PENDING_BYTES && !singleSnapshot) { client.ws.terminate(); return; }
+    // Reserve at most one large snapshot, even while a preceding control frame
+    // is in flight. Incremental traffic behind it has a separate bounded budget.
+    const hasSnapshot = (client.active?.bytes ?? 0) > MAX_PENDING_BYTES || client.queue.some(delivery => delivery.bytes > MAX_PENDING_BYTES);
+    if ((bytes > MAX_PENDING_BYTES && hasSnapshot) || client.pendingBytes + queuedBytes(bytes) > MAX_PENDING_BYTES) { client.ws.terminate(); return; }
     const allowed = () => {
-      if (authenticated && client.uid && !session(client)) return false;
+      if (authenticated && !session(client)) return false;
+      // A failed asynchronous RPC contains no board state. Return its error even
+      // if membership disappeared during the read, just like synchronous errors.
+      if (payload && typeof payload === 'object' && 'error' in payload) return true;
       if (boardId) {
         if (!client.uid || (watched && client.boardId !== boardId)) return false;
         try { collaboration.role(client.uid, boardId); } catch { return false; }
@@ -77,9 +86,24 @@ export function attachCollaboration(server: HTTPServer | HTTPSServer, store: Sto
       }
       return true;
     };
-    client.queue.push({ frames: encodeFrames(payload)[Symbol.iterator](), bytes, allowed, started: false });
-    client.pendingBytes += bytes;
+    const delivery: Delivery = { frames: loading ? null : client.tree ? encodeTreeFrames(payload) : encodeSerializedFrames(json!), bytes, allowed, started: false };
+    client.queue.push(delivery);
+    client.pendingBytes += queuedBytes(bytes);
     if (!client.active) pump(client);
+    if (loading) void (payload as Promise<unknown>).then(value => {
+      if (client.ws.readyState !== WebSocket.OPEN) return;
+      payload = value;
+      const serialized = client.tree ? null : JSON.stringify(value);
+      const actualBytes = client.tree ? transferReservation(value) : Buffer.byteLength(serialized!);
+      if (actualBytes > MAX_TRANSFER_BYTES) { client.ws.close(1009, 'Transfer too large'); return; }
+      if (client.active !== delivery) {
+        client.pendingBytes += queuedBytes(actualBytes) - queuedBytes(delivery.bytes);
+        if (client.pendingBytes > MAX_PENDING_BYTES) { client.ws.terminate(); return; }
+      }
+      delivery.bytes = actualBytes;
+      delivery.frames = client.tree ? encodeTreeFrames(value) : encodeSerializedFrames(serialized!);
+      if (client.active === delivery) pump(client);
+    }).catch(() => { client.ws.terminate(); });
   }
   function sendAuthenticated(client: Client, payload: unknown, boardId?: string) {
     if (!session(client)) { client.ws.close(1008, 'Session expired'); return; }
@@ -162,19 +186,24 @@ export function attachCollaboration(server: HTTPServer | HTTPSServer, store: Sto
       case 'users.key': return collaboration.userKey(z.object({ uid: idSchema }).strict().parse(params).uid);
       case 'boards.list': z.object({}).strict().parse(params); return collaboration.list(uid);
       case 'boards.create': return collaboration.create(uid, params as Parameters<typeof collaboration.create>[1]);
-      case 'boards.get': return collaboration.get(uid, boardParams.strict().parse(params).boardId);
+      case 'boards.get': {
+        const { boardId, known } = loadParams.parse(params);
+        const cancelled = () => client.ws.readyState !== WebSocket.OPEN || !session(client);
+        return known && client.tree ? collaboration.getCached(uid, boardId, known, cancelled) : collaboration.get(uid, boardId, cancelled);
+      }
       case 'boards.open':
       case 'boards.watch': {
-        const { boardId } = boardParams.strict().parse(params);
+        const { boardId, known } = (method === 'boards.open' ? loadParams : boardParams.strict()).parse(params) as z.infer<typeof loadParams>;
         const role = collaboration.role(uid, boardId);
         if (client.boardId !== boardId) unwatch(client);
         client.boardId = boardId; client.role = role;
         presence(boardId);
-        // Subscribe and capture the snapshot in the same synchronous dispatch; later
-        // patches queue behind this response without a second full-board download.
-        const vault = method === 'boards.open' ? collaboration.get(uid, boardId) : undefined;
+        // Capture metadata now; the response reserves its queue position before
+        // asynchronous file reads yield, so later patches stay behind the snapshot.
+        const cancelled = () => client.ws.readyState !== WebSocket.OPEN || !session(client);
+        const vault = method === 'boards.open' ? (known && client.tree ? collaboration.getCached(uid, boardId, known, cancelled) : collaboration.get(uid, boardId, cancelled)) : undefined;
         const watched = { role, peers: peers(boardId), selfId: client.id };
-        return vault ? { ...watched, vault } : watched;
+        return vault ? vault.then(value => ({ ...watched, vault: value })) : watched;
       }
       case 'boards.unwatch': z.object({}).strict().parse(params); unwatch(client); return { ok: true };
       case 'boards.patch': {
@@ -183,17 +212,20 @@ export function attachCollaboration(server: HTTPServer | HTTPSServer, store: Sto
       }
       case 'boards.delete': return collaboration.delete(uid, boardParams.strict().parse(params).boardId);
       case 'boards.rename': {
-        const value = boardParams.extend({ name: envelopeSchema }).strict().parse(params);
-        return collaboration.rename(uid, value.boardId, value.name);
+        const value = boardParams.extend({ name: envelopeSchema, expectedKey: base64url.length(512) }).strict().parse(params);
+        return collaboration.rename(uid, value.boardId, value.name, value.expectedKey);
       }
       case 'boards.invite': {
-        const value = boardParams.extend({ uid: idSchema, role: z.enum(['editor', 'viewer']), wrappedKey: base64url.length(512) }).strict().parse(params);
-        return collaboration.invite(uid, value.boardId, value.uid, value.role, value.wrappedKey);
+        const value = boardParams.extend({ uid: idSchema, role: z.enum(['editor', 'viewer']), wrappedKey: base64url.length(512), proof: envelopeSchema, revision: z.number().int().min(1), expectedKey: base64url.length(512) }).strict().parse(params);
+        return collaboration.invite(uid, value.boardId, value.uid, value.role, value.wrappedKey, value.proof, value.revision, value.expectedKey);
       }
       case 'boards.members': return collaboration.members(uid, boardParams.strict().parse(params).boardId);
       case 'boards.removeMember': {
-        const value = boardParams.extend({ uid: idSchema }).strict().parse(params);
-        return collaboration.removeMember(uid, value.boardId, value.uid);
+        throw new CollaborationError(409, 'Для удаления участника обновите приложение.');
+      }
+      case 'boards.rotate': {
+        const value = boardParams.extend({ rotation: z.unknown() }).strict().parse(params);
+        return collaboration.rotate(uid, value.boardId, value.rotation);
       }
       case 'boards.public': {
         const value = boardParams.extend({ snapshot: z.unknown() }).strict().parse(params);
@@ -228,12 +260,13 @@ export function attachCollaboration(server: HTTPServer | HTTPSServer, store: Sto
   wss.on('connection', (ws, request) => {
     const hash = sessionHash(request);
     const account = hash ? store.accountBySession(hash, Date.now()) : undefined;
-    const client: Client = { ws, id: randomUUID(), hash: account ? hash : null, uid: account?.id ?? null, boardId: null, role: null, selection: null, alive: true, count: 0, realtimeCount: 0, bytes: 0, until: Date.now() + 1000, receiver: new ChunkReceiver(), receivingSince: null, receiveTimeout: null, queue: [], pendingBytes: 0, active: null };
+    const client: Client = { ws, tree: request.url === '/socket?transfer=2', id: randomUUID(), hash: account ? hash : null, uid: account?.id ?? null, boardId: null, role: null, selection: null, alive: true, count: 0, realtimeCount: 0, bytes: 0, until: Date.now() + 1000, receiver: new ChunkReceiver(), receivingSince: null, receiveTimeout: null, queue: [], pendingBytes: 0, active: null };
     clients.add(client);
     ws.on('error', () => ws.terminate());
     ws.on('pong', () => { client.alive = true; });
     ws.on('close', () => { clients.delete(client); if (client.receiveTimeout) clearTimeout(client.receiveTimeout); client.receiver.clear(); client.queue = []; client.active = null; unwatch(client); });
     ws.on('message', (data, binary) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
       let id = '';
       let method = '';
       try {
@@ -263,21 +296,27 @@ export function attachCollaboration(server: HTTPServer | HTTPSServer, store: Sto
         const request = requestSchema.parse(input);
         id = request.id; method = request.method;
         const result = dispatch(client, request.method, request.params);
-        if (method === 'public.get') rawSend(client, { id, result }, undefined, false, false);
+        const payload = result instanceof Promise
+          ? result.then(value => ({ id, result: value }), error => ({ id, ...rpcError(error) }))
+          : { id, result };
+        if (method === 'public.get') rawSend(client, payload, undefined, false, false);
         else {
           const scope = request.params as { boardId?: string } | undefined;
           const boardId = method.startsWith('boards.') && typeof scope?.boardId === 'string' ? scope.boardId : undefined;
-          sendAuthenticated(client, { id, result }, method === 'boards.removeMember' || method === 'boards.delete' ? undefined : boardId);
+          sendAuthenticated(client, payload, method === 'boards.removeMember' || method === 'boards.delete' ? undefined : boardId);
         }
       } catch (error) {
-        const status = error instanceof CollaborationError ? error.status : error instanceof z.ZodError || error instanceof SyntaxError ? 400 : 500;
-        const message = error instanceof CollaborationError ? error.message : status === 400 ? 'Некорректный формат данных.' : 'Не удалось выполнить запрос.';
+        const { status, error: message } = rpcError(error);
         // Errors contain no board state and may be returned to unauthenticated clients.
         rawSend(client, { id, error: message, status }, undefined, false, false);
         if (status === 401 && client.uid) { unwatch(client); ws.close(1008, 'Session expired'); }
       }
     });
   });
+  function rpcError(error: unknown) {
+    const status = error instanceof CollaborationError ? error.status : error instanceof z.ZodError || error instanceof SyntaxError ? 400 : 500;
+    return { status, error: error instanceof CollaborationError ? error.message : status === 400 ? 'Некорректный формат данных.' : 'Не удалось выполнить запрос.' };
+  }
   function sessionHash(request: IncomingMessage): string | null {
     const values = (request.headers.cookie ?? '').split(';').map(part => part.trim()).filter(part => part.startsWith(`${cookieName}=`));
     if (values.length !== 1) return null;
@@ -286,7 +325,7 @@ export function attachCollaboration(server: HTTPServer | HTTPSServer, store: Sto
     return createHash('sha256').update(value).digest('hex');
   }
   function upgrade(request: IncomingMessage, socket: Duplex, head: Buffer) {
-    if (request.url !== '/socket') return;
+    if (request.url !== '/socket' && request.url !== '/socket?transfer=2') return;
     const reject = (status: number, message: string) => { socket.end(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); };
     if (closed || request.headers.origin !== origin) { reject(403, 'Forbidden'); return; }
     const now = Date.now(), address = request.socket.remoteAddress ?? 'unknown';

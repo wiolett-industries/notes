@@ -32,6 +32,9 @@ button:not(:disabled) { cursor: pointer; }
 .world.camera-focusing { transition: transform .2s ease-out; }
 .note { position: absolute; top: 0; left: 0; display: flex; flex-direction: column; width: 272px; height: 248px; border: 1px solid var(--paper-line); background: var(--paper); color: var(--paper-ink); border-radius: 3px; box-shadow: 0 3px 5px #00000004, 0 12px 28px -15px #00000025; transition: box-shadow .16s; cursor: grab; }
 .note:hover { box-shadow: 0 4px 8px #00000009, 0 15px 30px -12px #00000030; }
+.note.text-only-note, .note.text-only-note:hover { border-color: transparent; background: transparent; box-shadow: none; color: var(--text); }
+.text-only-note .note-content, .text-only-note .note-editor textarea { font-size: var(--text-size); font-weight: var(--text-weight); font-style: var(--text-style); text-decoration: var(--text-decoration); line-height: 1.35; padding: 4px; }
+.text-only-note .note-content > :first-child { margin-top: 0; }
 .note ::selection { background: color-mix(in srgb, var(--paper-ink) 26%, transparent); color: var(--paper-ink); }
 .note .button:not(:disabled):hover, .note .note-tools .button:not(:disabled):hover, .note .note-tools .button.pin-active { background: color-mix(in srgb, var(--paper-ink) 15%, var(--paper)); color: var(--paper-ink); }
 .note.selected { outline: 1.5px solid var(--paper-outline); outline-offset: 3px; z-index: 2; }
@@ -145,7 +148,10 @@ button:not(:disabled) { cursor: pointer; }
 .search-count { color: var(--muted); white-space: nowrap; font-size: 11px; font-variant-numeric: tabular-nums; }
 .search-popover .button { min-height: 32px; padding: 6px; }
 .board:has(.search-popover) .undo-toast { bottom: 158px; }
-.timed-toast { overflow: hidden; padding: 6px 6px 8px 14px; gap: 6px; animation: toast-enter .18s ease-out both; }
+.timed-toast { overflow: hidden; padding: 6px; gap: 6px; max-width: min(640px, calc(100vw - 24px)); white-space: pre-line; animation: toast-enter .18s ease-out both; }
+.timed-toast > span:first-child { padding-left: 8px; }
+.key-dialog.image-preview { width: calc(100vw - 32px); max-width: none; height: calc(100dvh - 32px); max-height: none; display: flex; flex-direction: column; }
+.image-preview > img { display: block; width: 100%; min-height: 0; flex: 1; object-fit: contain; cursor: zoom-out; }
 .timed-toast > span:first-child { font-size: 13px; }
 .timed-toast.leaving { animation: toast-leave .18s ease-in both; pointer-events: none; }
 .toast-countdown { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--accent); transform-origin: left; animation: toast-time 6s linear forwards; }

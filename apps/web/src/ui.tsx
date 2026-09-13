@@ -1,8 +1,9 @@
 import type { JSX } from 'preact';
-import { Plus, Minus, LockKeyhole, KeyRound, ArrowRight, Hand, MousePointer2, Scan, Trash2, X, Check, Download, Upload, StickyNote, Sun, RotateCw, Waypoints, ImagePlus, Grip, Group, Ellipsis, Search, ChevronLeft, ChevronRight, Pin, PinOff, PanelsTopLeft, Share2, UserRound, LogOut } from 'lucide-preact';
+import { Type, Bold, Italic, Underline, Plus, Minus, LockKeyhole, KeyRound, ArrowRight, Hand, MousePointer2, Scan, Trash2, X, Check, Download, Upload, StickyNote, Sun, RotateCw, Waypoints, ImagePlus, Grip, Group, Ellipsis, Search, ChevronLeft, ChevronRight, Pin, PinOff, PanelsTopLeft, Share2, UserRound, LogOut } from 'lucide-preact';
 
-export type IconName = 'plus' | 'minus' | 'lock' | 'key' | 'arrow' | 'hand' | 'cursor' | 'fit' | 'trash' | 'close' | 'check' | 'download' | 'upload' | 'note' | 'sun' | 'retry' | 'connect' | 'image' | 'grip' | 'group' | 'dashed' | 'search' | 'previous' | 'next' | 'pin' | 'unpin' | 'boards' | 'share' | 'user' | 'logout';
+export type IconName = 'text' | 'bold' | 'italic' | 'underline' | 'plus' | 'minus' | 'lock' | 'key' | 'arrow' | 'hand' | 'cursor' | 'fit' | 'trash' | 'close' | 'check' | 'download' | 'upload' | 'note' | 'sun' | 'retry' | 'connect' | 'image' | 'grip' | 'group' | 'dashed' | 'search' | 'previous' | 'next' | 'pin' | 'unpin' | 'boards' | 'share' | 'user' | 'logout';
 const icons = {
+  text: Type, bold: Bold, italic: Italic, underline: Underline,
   plus: Plus, minus: Minus, lock: LockKeyhole, key: KeyRound,
   arrow: ArrowRight, hand: Hand, cursor: MousePointer2, fit: Scan,
   trash: Trash2, close: X, check: Check, download: Download,

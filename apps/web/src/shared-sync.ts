@@ -71,6 +71,7 @@ export class SharedSync {
     });
   }
   get board() { return this.current; }
+  get revision() { return this.vault.revision; }
   get dirty() { return Boolean(this.pending) || this.edited; }
   update(board: BoardData) {
     const changed = board.notes !== this.current.notes || board.connections !== this.current.connections || board.groups !== this.current.groups || board.lockKeys !== this.current.lockKeys;
@@ -132,6 +133,24 @@ export class SharedSync {
     this.role = role;
     if (role === 'viewer') { this.pending = undefined; this.edited = false; }
     await this.reload();
+  }
+  async rekey(key: CryptoKey, role: BoardRole) {
+    let failure: unknown;
+    await this.run(async () => {
+      try {
+        const vault = await this.socket.request<EntityVault>('boards.get', { boardId: this.vault.accountId });
+        const decoded = await decodeVault(key, vault);
+        if (vault.revision < this.vault.revision) throw new Error(t('Некорректная версия доски.'));
+        const next = role === 'viewer' ? { ...decoded.board, camera: this.current.camera } : merge(this.base, this.current, decoded.board, role);
+        // Do not install a candidate key until it authenticates the current vault.
+        this.key = key; this.role = role; this.pending = undefined;
+        this.vault = vault; this.index = decoded.index!; this.base = decoded.board; this.current = next;
+        this.edited = !equal({ ...this.base, camera: null }, { ...next, camera: null });
+        this.changed(next);
+        if (role !== 'viewer') await this.save();
+      } catch (error) { failure = error; throw error; }
+    });
+    if (failure) throw failure;
   }
   forgetNote(id: string, sealed: NoteData) {
     for (const snapshot of [this.base, this.current, this.pending?.board]) {

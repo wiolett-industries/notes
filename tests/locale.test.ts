@@ -77,8 +77,9 @@ test('all current literal server errors have translations, unknown errors have a
   let checked = 0;
   for (const file of readdirSync(directory).filter(name => name.endsWith('.ts'))) {
     const source = readFileSync(new URL(file, directory), 'utf8');
-    for (const match of source.matchAll(/'((?:\\.|[^'\\])*)'/g)) {
-      const message = match[1];
+    for (const match of source.matchAll(/\/\/[^\n]*|\/\*[\s\S]*?\*\/|'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)"/g)) {
+      const message = match[1] ?? match[2];
+      if (message === undefined) continue;
       if (!/[А-Яа-яЁё]/.test(message)) continue;
       assert.ok(Object.hasOwn(catalog, message) || isStorageLimit(message), `${file}: ${message}`);
       assert.doesNotMatch(localizeError(message, 'en'), /[А-Яа-яЁё]/);

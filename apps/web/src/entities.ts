@@ -34,7 +34,7 @@ function* records(board: BoardData): Generator<[string, unknown]> {
   yield ['lockKeys', board.lockKeys ?? null];
   for (const note of board.notes) {
     const hasImage = note.kind === 'image' || Boolean(note.image);
-    yield [`note-content:${note.id}`, { kind: note.kind, title: note.title, text: note.text, sealed: hasImage ? undefined : note.sealed, mentions: note.mentions }];
+    yield [`note-content:${note.id}`, { kind: note.kind, title: note.title, text: note.text, textStyle: note.textStyle, sealed: hasImage ? undefined : note.sealed, mentions: note.mentions }];
     if (hasImage) yield [`note-image:${note.id}`, { image: note.image, sealed: note.sealed }];
     yield [`note-layout:${note.id}`, { x: note.x, y: note.y, width: note.width, height: note.height, color: note.color, pinned: note.pinned }];
   }
@@ -112,8 +112,10 @@ export async function decodeVault(key: CryptoKey, vault: Vault, previous?: { boa
   }
   if (index.size !== integrity.count || await rootHash(index) !== integrity.root) throw new Error(t("Нарушена целостность доски. Загрузка отменена."));
   const values = new Map<string, unknown>();
-  for (const entity of entities) {
-    if (reusable.has(entity.id) && entity.access && cachedValues?.has(entity.access.address)) { values.set(entity.access.address, cachedValues.get(entity.access.address)); continue; }
+  // Bound concurrent decryption to four entities, including large image payloads.
+  for (let offset = 0; offset < entities.length; offset += 4) {
+    await Promise.all(entities.slice(offset, offset + 4).map(async entity => {
+    if (reusable.has(entity.id) && entity.access && cachedValues?.has(entity.access.address)) { values.set(entity.access.address, cachedValues.get(entity.access.address)); return; }
     const data = await decrypt(key, vault.accountId, entity.id, entity.revision, entity.envelope);
     try {
       const record = z.object({ address: z.string().max(100), data: z.unknown() }).strict().parse(JSON.parse(new TextDecoder().decode(data)));
@@ -123,6 +125,8 @@ export async function decodeVault(key: CryptoKey, vault: Vault, previous?: { boa
       index.get(entity.id)!.bytes = data.byteLength;
       values.set(record.address, record.data);
     } finally { data.fill(0); }
+    }));
+    if (offset % 64 === 0) await new Promise(resolve => setTimeout(resolve, 0));
   }
   function read(address: string) {
     if (!values.has(address)) throw new Error(t("В доске отсутствует объект."));

@@ -2,14 +2,14 @@ import { applyBoardListLimits } from './client-config';
 import { readCamera, rememberCamera, flushCameras } from './camera-memory';
 import { t, countLabel, isStorageLimit, quotaMessage, storageUsage } from './locale';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { BOARD_STORAGE_LIMIT, MAX_TRANSFER_BYTES, emptyBoard, type BoardData, type BoardEntry, type EntityVault, type NoteData } from '@quiet/shared';
+import { BOARD_STORAGE_LIMIT, MAX_TRANSFER_BYTES, emptyBoard, type BoardData, type BoardEntry, type EntityVault, type NoteData, type Envelope } from '@quiet/shared';
 import { Board } from './Board';
 import { Button, Icon } from './ui';
 import { BoardSocket } from './socket';
 import { SharedSync } from './shared-sync';
 import { decodeVault, entityId, prepareDelta } from './entities';
 import { fromBase64, toBase64, decryptBoard } from './crypto';
-import { identityFor, boardKey, boardSecret, wrapBoardKey, encryptValue, decryptValue, publicSnapshot, type SharingIdentity } from './sharing-crypto';
+import { identityFor, boardKey, boardSecret, wrapBoardKey, encryptValue, decryptValue, publicSnapshot, contactCode, parseContactCode, verifyContactCode, sealRecipient, verifiedRecipient, type SharingIdentity } from './sharing-crypto';
 import { KeyDialog } from './KeyDialog';
 import { unlockNote, authError, type Unlocked } from './passkey';
 import { unlockWithKey } from './key-auth';
@@ -17,6 +17,7 @@ import { sealNote } from './note-lock';
 import { Modal } from './Modal';
 import { RoleDropdown } from './RoleDropdown';
 import { participantColor } from './participant-color';
+import { ApiError } from './api';
 
 type NamedBoard = BoardEntry & { title: string; key: CryptoKey; limitBytes?: number };
 type Peer = { id: string; uid: string; role: string; color?: number; x: number; y: number; selection?: string[] };
@@ -33,7 +34,16 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
   const [profile, setProfile] = useState(false), [copiedUid, setCopiedUid] = useState(false);
   const [deleting, setDeleting] = useState<NamedBoard | null>(null);
   const [limitReached, setLimitReached] = useState(false);
-  function reportError(message: string) { if (isStorageLimit(message)) { setLimitReached(true); setError(''); } else setError(message); }
+  const limitReported = useRef(false);
+  function reportError(message: string) {
+    if (isStorageLimit(message)) {
+      if (!limitReported.current) setLimitReached(true);
+      limitReported.current = true; setError('');
+    } else {
+      if (!message) { limitReported.current = false; setLimitReached(false); }
+      setError(message);
+    }
+  }
   function usageBar(entry: NamedBoard) {
     const bytes = entry.usedBytes ?? 0, limit = entry.limitBytes ?? BOARD_STORAGE_LIMIT;
     return <span className="board-storage" role="progressbar" aria-label={t("Занято на доске")} aria-valuemin={0} aria-valuemax={limit / 1e6} aria-valuenow={Math.round(bytes / 1e6)} data-tooltip={storageUsage(bytes, limit)}><span style={{ width: `${Math.min(100, bytes / limit * 100)}%` }} /></span>;
@@ -44,7 +54,8 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
   const renaming = useRef<Promise<void> | null>(null);
   const [inviteUid, setInviteUid] = useState('');
   const [inviteRole, setInviteRole] = useState<'editor' | 'viewer'>('viewer');
-  const [members, setMembers] = useState<{ uid: string; role: string; color: number }[]>([]);
+  const [members, setMembers] = useState<{ uid: string; role: string; color: number; proof: Envelope | null }[]>([]);
+  const [myContact, setMyContact] = useState('');
   const [peers, setPeers] = useState<Peer[]>([]);
   const [people, setPeople] = useState(1);
   const [dragPreviews, setDragPreviews] = useState<Record<string, DragPosition>>({});
@@ -62,7 +73,15 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
   const switching = useRef<{ boardId: string; patches: any[] } | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const own = entries.filter(item => item.ownerId === account.accountId), invited = entries.filter(item => item.ownerId !== account.accountId);
-  async function list() {
+  const listing = useRef<Promise<NamedBoard[]>>(Promise.resolve([]));
+  function list(): Promise<NamedBoard[]> {
+    // Serialize responses and key installation; an earlier request must never
+    // overwrite a newer rotation result after slow decryption or network delay.
+    const result = listing.current.catch(() => []).then(loadList);
+    listing.current = result;
+    return result;
+  }
+  async function loadList() {
     const list = await socket.current!.request<BoardEntry[]>('boards.list');
     applyBoardListLimits(list);
     const named: NamedBoard[] = [];
@@ -73,9 +92,12 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
       named.push({ ...entry, key, title });
     }
     if (alive.current) {
-      setEntries(named);
       const active = current.current, updated = active && named.find(entry => entry.id === active.id);
-      if (updated) { current.current = updated; setSelected(updated); }
+      if (updated) {
+        if (active && active.wrappedKey !== updated.wrappedKey && manager.current) await manager.current.rekey(updated.key, updated.role);
+        current.current = updated; setSelected(updated);
+      }
+      setEntries(named);
     }
     return named;
   }
@@ -119,17 +141,25 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     if (immediate) for (const value of renames.current.values()) value.due = 0;
     if (renaming.current) return renaming.current;
     renaming.current = (async () => {
+      let conflicts = 0;
       while (renames.current.size) {
         const [id, value] = renames.current.entries().next().value!;
         const wait = value.due - performance.now();
         if (wait > 0) { renameTimer.current = setTimeout(() => void flushNames(), wait); return; }
         try {
-          await socket.current!.request('boards.rename', { boardId: id, name: await encryptValue(value.entry.key, id, 'name', value.title) });
+          const active = current.current?.id === id ? current.current : value.entry;
+          await socket.current!.request('boards.rename', { boardId: id, expectedKey: active.wrappedKey, name: await encryptValue(active.key, id, 'name', value.title) });
           if (renames.current.get(id) === value) renames.current.delete(id);
           if (!alive.current) return;
           setEntries(entries => entries.map(entry => entry.id === id ? { ...entry, title: value.title } : entry));
           if (current.current?.id === id) { current.current = { ...current.current, title: value.title }; setSelected(current.current); }
-        } catch (error) { if (alive.current) reportError(authError(error)); return; }
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 409 && conflicts++ < 2) {
+            const refreshed = (await list()).find(entry => entry.id === id);
+            if (refreshed) { value.entry = refreshed; continue; }
+          }
+          if (alive.current) reportError(authError(error)); return;
+        }
       }
     })().finally(() => { renaming.current = null; });
     return renaming.current;
@@ -190,6 +220,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     void (async () => {
       try {
         identity.current = await identityFor(ws, account);
+        setMyContact(await contactCode(account.accountId, identity.current.publicKey));
         if (!alive.current) return;
         const all = await list();
         if (!identity.current.initialized && !all.some(entry => entry.ownerId === account.accountId)) await create(t("Моя доска"), initialBoard);
@@ -238,12 +269,39 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     setName(selected.title); setMembers(await socket.current!.request('boards.members', { boardId: selected.id })); setSharing(true);
   }
   async function invite(target = inviteUid.trim(), role = inviteRole) {
-    if (!selected) return;
-    const uid = target; const recipient = await socket.current!.request<{ publicKey: string }>('users.key', { uid });
-    const bytes = await boardSecret(selected, account.accountId, identity.current!);
-    try { await socket.current!.request('boards.invite', { boardId: selected.id, uid, role, wrappedKey: await wrapBoardKey(bytes, selected.id, uid, recipient.publicKey) }); }
+    const active = current.current, sync = manager.current;
+    if (!active || !sync || !(await sync.flush())) return;
+    const existing = members.find(member => member.uid === target);
+    let uid: string, publicKey: string;
+    if (existing) {
+      uid = existing.uid; publicKey = await verifiedRecipient(account.key, active.id, uid, existing.proof);
+    } else {
+      uid = parseContactCode(target).uid;
+      const recipient = await socket.current!.request<{ publicKey: string }>('users.key', { uid });
+      await verifyContactCode(target, recipient.publicKey); publicKey = recipient.publicKey;
+    }
+    const bytes = await boardSecret(active, account.accountId, identity.current!);
+    try { await socket.current!.request('boards.invite', { boardId: active.id, uid, role, expectedKey: active.wrappedKey, revision: sync.revision, proof: await sealRecipient(account.key, active.id, uid, publicKey), wrappedKey: await wrapBoardKey(bytes, active.id, uid, publicKey) }); }
     finally { bytes.fill(0); }
-    setInviteUid(''); setMembers(await socket.current!.request('boards.members', { boardId: selected.id }));
+    setInviteUid(''); setMembers(await socket.current!.request('boards.members', { boardId: active.id }));
+  }
+  async function removeMember(target: string) {
+    await flushNames(true);
+    if (renames.current.size) throw new Error(t('Сначала сохраните изменения.'));
+    await list();
+    const active = current.current, sync = manager.current;
+    if (!active || !sync || !(await sync.flush())) return;
+    const all = await socket.current!.request<typeof members>('boards.members', { boardId: active.id });
+    const recipients = await Promise.all(all.filter(member => member.uid !== target).map(async member => ({ uid: member.uid, publicKey: member.uid === account.accountId ? identity.current!.publicKey : await verifiedRecipient(account.key, active.id, member.uid, member.proof) })));
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    try {
+      const key = await crypto.subtle.importKey('raw', secret, 'AES-GCM', false, ['encrypt', 'decrypt']);
+      const revision = sync.revision;
+      const prepared = (await prepareDelta(key, active.id, revision, sync.board, null, true))!;
+      const wrapped = await Promise.all(recipients.map(async recipient => ({ uid: recipient.uid, wrappedKey: await wrapBoardKey(secret, active.id, recipient.uid, recipient.publicKey) })));
+      await socket.current!.request('boards.rotate', { boardId: active.id, rotation: { target, revision, mutationId: crypto.randomUUID(), expectedName: active.name, name: await encryptValue(key, active.id, 'name', active.title), snapshot: { format: 2, manifest: prepared.patch.manifest, entities: prepared.patch.upserts }, members: wrapped } });
+      await list(); setMembers(await socket.current!.request('boards.members', { boardId: active.id }));
+    } finally { secret.fill(0); }
   }
   async function publish() {
     if (!selected || !(await manager.current!.flush())) throw new Error(t("Сначала сохраните изменения."));
@@ -366,7 +424,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
   const publicUrl = selected?.publicToken ? `${location.origin}/#public=${selected.publicToken}` : '';
   return <>
     {selected && people > 1 && <div className="board-presence-count" title={t("Участников на доске")} aria-label={countLabel('people', people)}><Icon name="user" size={16} /><span>{people}</span></div>}
-    {selected ? <Board key={selected.id} board={board} onChange={change} onStorageLimit={() => setLimitReached(true)} role={selected.role} peers={peers} onCursor={cursor} onSelection={selection} onDrag={dragging} dragPreviews={dragPreviews} noteBusy={noteBusy} onToggleLock={toggleLock} clipboardKey={selected.key} accountId={selected.id} interactionBlocked={menu || sharing || profile || busy || Boolean(unlocking) || Boolean(deleting) || limitReached} actions={<>
+    {selected ? <Board key={selected.id} board={board} onChange={change} onImportBatch={() => manager.current?.flush() ?? Promise.resolve(false)} onStorageLimit={() => reportError(quotaMessage(selected.limitBytes ?? BOARD_STORAGE_LIMIT))} role={selected.role} peers={peers} onCursor={cursor} onSelection={selection} onDrag={dragging} dragPreviews={dragPreviews} noteBusy={noteBusy} onToggleLock={toggleLock} clipboardKey={selected.key} accountId={selected.id} interactionBlocked={menu || sharing || profile || busy || Boolean(unlocking) || Boolean(deleting) || limitReached} actions={<>
       <Button className="board-picker" icon="boards" onClick={() => void action(async () => { await list(); setMenu(true); })} label={t("Выбрать доску")}><span className="board-picker-label">{selected.title}</span></Button>
       <Button icon="user" label={`UID: ${account.accountId}`} onClick={() => { setCopiedUid(false); setProfile(true); }} />
       {selected.role === 'owner' && <Button icon="share" label={t("Доступ к доске")} onClick={() => void action(share)} />}
@@ -395,19 +453,22 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     <Modal open={profile} close={() => setProfile(false)} className="workspace-dialog" label={t("Ваш UID")}>
       <input aria-label={t("Ваш UID")} readOnly value={account.accountId} onFocus={e => e.currentTarget.select()} />
       <Button onClick={() => void action(async () => { await copy(account.accountId); setCopiedUid(true); })}>{copiedUid ? t("Скопировано") : t("Скопировать UID")}</Button>
+      <label>{t("Код приглашения")}<input readOnly value={myContact} onFocus={e => e.currentTarget.select()} /></label>
+      <Button disabled={!myContact} onClick={() => void action(() => copy(myContact))}>{t("Скопировать код приглашения")}</Button>
+      <p>{t("Передайте этот код владельцу доски через доверенный канал.")}</p>
       {error && <p className="key-error" role="alert">{error}</p>}
     </Modal>
     <Modal open={sharing} close={() => void closeShare()} className="workspace-dialog" label={t("Доступ к доске")}>
       {error && <p className="key-error" role="alert">{error}</p>}
       <label>{t("Название")}<input className="access-key-input" value={name} maxLength={120} onInput={e => editName(e.currentTarget.value)} /></label>
-      <label>{t("UID участника")}<input className="access-key-input" value={inviteUid} onInput={e => setInviteUid(e.currentTarget.value)} autoComplete="off" /></label>
+      <label>{t("Код приглашения")}<input className="access-key-input" value={inviteUid} onInput={e => setInviteUid(e.currentTarget.value)} autoComplete="off" /></label>
       <RoleDropdown value={inviteRole} change={setInviteRole} disabled={busy} />
-      <Button disabled={busy || !inviteUid.trim() || (members.length >= 10 && !members.some(member => member.uid === inviteUid.trim()))} onClick={() => void action(invite)}>{t("Добавить участника")}</Button>
+      <Button disabled={busy || !inviteUid.trim() || (members.length >= 10 && !members.some(member => inviteUid.trim().startsWith(`notes-contact:${member.uid}:`)))} onClick={() => void action(invite)}>{t("Добавить участника")}</Button>
       <div className="member-list"><h3>{t('Участники')} · {members.length}/10</h3>
       {members.map(member => <div className="member-row" key={member.uid}>
         <span className="member-avatar" style={{ color: participantColor(member.uid, member.color) }}><Icon name="user" size={18} /></span>
-        <span className="member-identity" title={member.uid}><span>{member.uid === account.accountId ? t("Вы") : `${member.uid.slice(0, 8)}…${member.uid.slice(-4)}`}</span><small>{member.uid === account.accountId ? t("Владелец") : t("Приглашённый участник")}</small></span>
-        {member.uid !== account.accountId && <><RoleDropdown compact value={member.role as 'editor' | 'viewer'} change={role => void action(() => invite(member.uid, role))} disabled={busy} /><Button icon="trash" label={t("Убрать доступ")} disabled={busy} onClick={() => void action(async () => { await socket.current!.request('boards.removeMember', { boardId: selected!.id, uid: member.uid }); setMembers(await socket.current!.request('boards.members', { boardId: selected!.id })); })} /></>}
+        <span className="member-identity" title={member.uid}><span>{member.uid === account.accountId ? t("Вы") : `${member.uid.slice(0, 8)}…${member.uid.slice(-4)}`}</span><small>{member.uid === account.accountId ? t("Владелец") : member.proof ? t("Ключ подтверждён") : t("Нужно подтвердить ключ")}</small></span>
+        {member.uid !== account.accountId && <><RoleDropdown compact value={member.role as 'editor' | 'viewer'} change={role => void action(() => invite(member.uid, role))} disabled={busy} /><Button icon="trash" label={t("Убрать доступ")} disabled={busy} onClick={() => void action(() => removeMember(member.uid))} /></>}
       </div>)}</div>
       <Button disabled={busy} onClick={() => void action(publish)}>{publicUrl ? t("Отключить публичный доступ") : t("Опубликовать снимок доски")}</Button>
       {publicUrl && <><input className="access-key-input" aria-label={t("Публичная ссылка")} readOnly value={publicUrl} /><Button onClick={() => void action(() => copy(publicUrl))}>{t("Скопировать ссылку")}</Button><p>{t("Опубликован снимок. Новые изменения останутся приватными.")}</p></>}

@@ -12,8 +12,19 @@ export async function readImage(file: File) {
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error(t("Не удалось обработать изображение."));
     ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    let image = canvas.toDataURL('image/webp', .85);
-    if (image.length > 4_000_000) image = canvas.toDataURL('image/webp', .65);
+    // toDataURL synchronously encodes the entire bitmap on the UI thread.
+    // Let the browser encode asynchronously, then read the bounded result.
+    async function encode(quality: number): Promise<string> {
+      const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error(t('Не удалось обработать изображение.'))), 'image/webp', quality));
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error(t('Не удалось обработать изображение.')));
+        reader.readAsDataURL(blob);
+      });
+    }
+    let image = await encode(.85);
+    if (image.length > 4_000_000) image = await encode(.65);
     if (image.length > 4_000_000) throw new Error(t("Изображение слишком большое после сжатия."));
     return { image, ratio: canvas.width / canvas.height };
   } finally { bitmap.close(); }

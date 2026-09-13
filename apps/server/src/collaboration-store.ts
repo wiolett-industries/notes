@@ -1,11 +1,12 @@
 import { createHash, createPublicKey, randomBytes } from 'node:crypto';
+import { setImmediate as yieldToIO } from 'node:timers/promises';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import {
-  MAX_BOARD_BYTES, MAX_ENCRYPTED_BYTES, MAX_ENTITIES, MAX_TRANSFER_BYTES, base64url, deltaSchema,
+  MAX_BOARD_BYTES, MAX_ENCRYPTED_BYTES, MAX_ENTITIES, MAX_TRANSFER_BYTES, base64url, deltaSchema, entityWriteSchema, jsonPieces,
   envelopeSchema, initialEntitiesSchema, publicSnapshotSchema,
   type AccountIdentity, type BoardEntry, type BoardRole, type DeltaWrite,
-  type EntityWrite, type Envelope, type InitialEntities, type PublicSnapshot, type Vault,
+  type EntityWrite, type Envelope, type InitialEntities, type PublicSnapshot, type Vault, type CachedRevision, type DeltaVault,
 } from '@quiet/shared';
 import type { imageFiles } from './image-files.js';
 import { storageLimitBytes } from './storage-limit.js';
@@ -48,6 +49,11 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
       PRIMARY KEY(board_id, uid)
     ) STRICT;
     CREATE INDEX IF NOT EXISTS collaboration_member_uid ON collaboration_members(uid);
+    CREATE TABLE IF NOT EXISTS collaboration_verified_keys (
+      board_id TEXT NOT NULL, uid TEXT NOT NULL, proof TEXT NOT NULL,
+      PRIMARY KEY(board_id, uid),
+      FOREIGN KEY(board_id, uid) REFERENCES collaboration_members(board_id, uid) ON DELETE CASCADE
+    ) STRICT;
     CREATE TABLE IF NOT EXISTS collaboration_entities (
       board_id TEXT NOT NULL REFERENCES collaboration_boards(id) ON DELETE CASCADE,
       entity_id TEXT NOT NULL, revision INTEGER NOT NULL, envelope TEXT NOT NULL,
@@ -178,7 +184,62 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
     }
     noteFlags(after.values());
   }
-  function writeEntities(boardId: string, revision: number, previous: EntityRow[], upserts: EntityWrite[], deletes: string[], created: string[], retired: string[]) {
+  // Keep the original schema's canonical field order (mutation hashes are
+  // durable), but validate encrypted strings one entity per event-loop turn.
+  const entityMetadata = entityWriteSchema.safeExtend({ envelope: z.custom<Envelope>(() => true) });
+  const patchMetadata = deltaSchema.safeExtend({ upserts: z.array(entityMetadata).max(MAX_ENTITIES) });
+  const snapshotMetadata = initialEntitiesSchema.safeExtend({ entities: z.array(entityMetadata).min(3).max(MAX_ENTITIES) });
+  async function validateEnvelopes(entities: { envelope: unknown }[]) {
+    let bytes = 0;
+    for (const entity of entities) {
+      await yieldToIO();
+      entity.envelope = envelopeSchema.parse(entity.envelope);
+      bytes += (entity.envelope as Envelope).ciphertext.length + 64;
+      if (bytes > MAX_ENCRYPTED_BYTES) fail(413, 'Доска превышает допустимый размер.');
+    }
+  }
+  async function mutationHash(value: unknown) {
+    const hash = createHash('sha256'); let bytes = 0;
+    for (const piece of jsonPieces(value)) {
+      hash.update(piece); bytes += piece.length;
+      if (bytes >= 64 * 1024) { await yieldToIO(); bytes = 0; }
+    }
+    return hash.digest('hex');
+  }
+  type Staged = { entries: Map<string, { file: string | null; serialized: string; bytes: number }>; used: Set<string>; cleanup: (committed?: boolean) => Promise<void> };
+  let stagingBytes = 0;
+  async function stageEntities(entities: EntityWrite[]): Promise<Staged> {
+    const bytes = entities.reduce((sum, entity) => sum + entity.envelope.ciphertext.length + 128, 0);
+    if (stagingBytes + bytes > MAX_ENCRYPTED_BYTES * 2) fail(429, 'Сервер занят загрузкой. Повторите попытку.');
+    stagingBytes += bytes;
+    const entries: Staged['entries'] = new Map(), used = new Set<string>();
+    let cleaned = false;
+    const cleanup = async (committed = false) => {
+      if (cleaned) return;
+      cleaned = true;
+      try {
+        for (const [id, entry] of entries) if (entry.file && (!committed || !used.has(id))) {
+          await yieldToIO();
+          try { files.remove(entry.file); } catch { console.error('Encrypted image cleanup deferred until restart.'); }
+        }
+      } finally { stagingBytes -= bytes; }
+    };
+    try {
+      for (const entity of entities) {
+        await yieldToIO();
+        if (entity.storage === 'file') {
+          const file = await files.writeAsync(entity.envelope);
+          const bytes = JSON.stringify({ ...entity.envelope, ciphertext: '' }).length + entity.envelope.ciphertext.length;
+          entries.set(entity.id, { file, serialized: '', bytes });
+        } else {
+          const serialized = JSON.stringify(entity.envelope);
+          entries.set(entity.id, { file: null, serialized, bytes: serialized.length });
+        }
+      }
+      return { entries, used, cleanup };
+    } catch (error) { await cleanup(); throw error; }
+  }
+  function writeEntities(boardId: string, revision: number, previous: EntityRow[], upserts: EntityWrite[], deletes: string[], created: string[], retired: string[], staged?: Staged) {
     const old = new Map(previous.map(row => [row.entity_id, row]));
     for (const id of deletes) {
       if (old.get(id)?.file_name) retired.push(old.get(id)!.file_name!);
@@ -188,15 +249,48 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
       ON CONFLICT(board_id, entity_id) DO UPDATE SET revision=excluded.revision, envelope=excluded.envelope,
       access=excluded.access, byte_length=excluded.byte_length, file_name=excluded.file_name`);
     for (const entity of upserts) {
-      const serialized = JSON.stringify(entity.envelope);
+      const prepared = staged?.entries.get(entity.id);
+      if (staged && !prepared) throw new Error('Missing staged entity.');
+      const serialized = prepared?.serialized ?? JSON.stringify(entity.envelope);
       if (old.get(entity.id)?.file_name) retired.push(old.get(entity.id)!.file_name!);
-      const file = entity.storage === 'file' ? files.write(entity.envelope) : null;
-      if (file) created.push(file);
-      put.run(boardId, entity.id, revision, file ? '' : serialized, JSON.stringify(entity.access), serialized.length, file);
+      const file = prepared ? prepared.file : entity.storage === 'file' ? files.write(entity.envelope) : null;
+      if (file && !staged) created.push(file);
+      staged?.used.add(entity.id);
+      put.run(boardId, entity.id, revision, file ? '' : serialized, JSON.stringify(entity.access), prepared?.bytes ?? serialized.length, file);
     }
     // Reserve framing space so a valid persisted board can always be downloaded.
     const size = db.prepare('SELECT COUNT(*) AS count, COALESCE(SUM(byte_length), 0) AS bytes, COALESCE(SUM(byte_length + length(access) + length(entity_id) + 96), 0) AS transfer_bytes FROM collaboration_entities WHERE board_id = ?').get(boardId) as { count: number; bytes: number; transfer_bytes: number };
     if (size.count > MAX_ENTITIES || size.bytes > MAX_ENCRYPTED_BYTES || size.transfer_bytes > MAX_TRANSFER_BYTES - 16_384) fail(413, 'Доска превышает допустимый размер.');
+  }
+  async function loadSnapshot(uid: string, boardId: string, known?: CachedRevision[], cancelled?: () => boolean): Promise<Vault | DeltaVault> {
+    const revisions = new Map(known?.map(item => [item.id, item.revision]));
+    // Capture metadata synchronously; never hold SQLite over await. Only changed
+    // files are retained/read. The fresh manifest and complete entity inventory
+    // remain authoritative, including deletions and key-rotation revisions.
+    const snapshot = transaction(() => {
+      role(uid, boardId);
+      const value = board(boardId), entities = rows(boardId);
+      const release = files.retain(entities.flatMap(row => row.file_name && revisions.get(row.entity_id) !== row.revision ? [row.file_name] : []));
+      return { value, entities, release };
+    });
+    try {
+      const entities: DeltaVault['entities'] = [];
+      let index = 0;
+      for (const row of snapshot.entities) {
+        const changed = revisions.get(row.entity_id) !== row.revision;
+        // Cached metadata is cheap; still yield every 128 records. Changed data
+        // yields per entity, with only one file read in flight per snapshot.
+        if (changed || index++ % 128 === 0) {
+          await yieldToIO();
+          if (cancelled?.()) fail(499, 'Загрузка прервана.');
+          role(uid, boardId);
+        }
+        const envelope = changed ? (row.file_name ? await files.readAsync(row.file_name) : JSON.parse(row.envelope)) : undefined;
+        entities.push({ id: row.entity_id, revision: row.revision, ...(envelope ? { envelope } : {}), access: JSON.parse(row.access) });
+      }
+      role(uid, boardId);
+      return { format: 2, accountId: boardId, revision: snapshot.value.revision, manifest: JSON.parse(snapshot.value.manifest), entities, ...(known ? { delta: true as const } : {}) } as Vault | DeltaVault;
+    } finally { snapshot.release(); }
   }
   return {
     role,
@@ -245,8 +339,13 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
     list(uid: string): BoardEntry[] {
       return transaction(() => (db.prepare('SELECT board_id FROM collaboration_members WHERE uid = ? ORDER BY board_id').all(uid) as { board_id: string }[]).map(row => entry(uid, row.board_id)));
     },
-    create(uid: string, input: { id: string; name: Envelope; wrappedKey: string; snapshot: InitialEntities }): BoardEntry {
-      const value = z.object({ id: identifier, name: nameSchema, wrappedKey: wrappedKeySchema, snapshot: initialEntitiesSchema }).strict().parse(input);
+    async create(uid: string, input: { id: string; name: Envelope; wrappedKey: string; snapshot: InitialEntities }): Promise<BoardEntry> {
+      const value = z.object({ id: identifier, name: nameSchema, wrappedKey: wrappedKeySchema, snapshot: snapshotMetadata }).strict().parse(input) as typeof input;
+      if (!identity(uid)) fail(409, 'Сначала создайте ключи пользователя.');
+      await validateEnvelopes(value.snapshot.entities);
+      const staged = await stageEntities(value.snapshot.entities);
+      let committed = false;
+      try {
       const result = transaction((created, retired) => {
         const existing = board(value.id);
         if (existing) {
@@ -260,26 +359,30 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
         checkPolicy(value.id, 'owner', [], value.snapshot.entities, []);
         db.prepare('INSERT INTO collaboration_boards VALUES (?, ?, ?, 1, ?, NULL, NULL)').run(value.id, uid, JSON.stringify(value.name), JSON.stringify(value.snapshot.manifest));
         db.prepare('INSERT INTO collaboration_members (board_id, uid, role, wrapped_key, color) VALUES (?, ?, ?, ?, 0)').run(value.id, uid, 'owner', value.wrappedKey);
-        writeEntities(value.id, 1, [], value.snapshot.entities, [], created, retired);
+        writeEntities(value.id, 1, [], value.snapshot.entities, [], created, retired, staged);
         checkQuota(value.id);
         db.prepare('UPDATE collaboration_identities SET initialized = 1 WHERE uid = ?').run(uid);
         return entry(uid, value.id);
       });
+      committed = true;
       notify({ event: 'boards.changed', boardId: value.id, uids: [uid] });
       return result;
+      } finally { await staged.cleanup(committed); }
     },
-    get(uid: string, boardId: string): Vault {
-      return transaction(() => {
-        role(uid, boardId);
-        const value = board(boardId);
-        return { format: 2, accountId: boardId, revision: value.revision, manifest: JSON.parse(value.manifest), entities: rows(boardId).map(row => ({ id: row.entity_id, revision: row.revision, envelope: row.file_name ? files.read(row.file_name) : JSON.parse(row.envelope), access: JSON.parse(row.access) })) };
-      });
+    get(uid: string, boardId: string, cancelled?: () => boolean): Promise<Vault> { return loadSnapshot(uid, boardId, undefined, cancelled) as Promise<Vault>; },
+    getCached(uid: string, boardId: string, known: CachedRevision[], cancelled?: () => boolean): Promise<DeltaVault> {
+      return loadSnapshot(uid, boardId, known, cancelled) as Promise<DeltaVault>;
     },
-    patch(uid: string, boardId: string, input: DeltaWrite): { revision: number } {
-      const patch = deltaSchema.parse(input);
+    async patch(uid: string, boardId: string, input: DeltaWrite): Promise<{ revision: number }> {
+      if (role(uid, boardId) === 'viewer') fail(403, 'Доска доступна только для чтения.');
+      const patch = patchMetadata.parse(input) as DeltaWrite;
       if (patch.accountId !== boardId || patch.migrate) fail(400, 'Некорректная доска или режим миграции.');
-      const requestHash = createHash('sha256').update(JSON.stringify(patch)).digest('hex');
+      await validateEnvelopes(patch.upserts);
+      const requestHash = await mutationHash(patch);
+      const staged = await stageEntities(patch.upserts);
       let committed = false;
+      let succeeded = false;
+      try {
       const result = transaction((created, retired) => {
         const actorRole = role(uid, boardId);
         if (actorRole === 'viewer') fail(403, 'Доска доступна только для чтения.');
@@ -293,7 +396,7 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
         const previous = rows(boardId);
         checkPolicy(boardId, actorRole, previous, patch.upserts, patch.deletes);
         const revision = value.revision + 1;
-        writeEntities(boardId, revision, previous, patch.upserts, patch.deletes, created, retired);
+        writeEntities(boardId, revision, previous, patch.upserts, patch.deletes, created, retired, staged);
         const updated = db.prepare('UPDATE collaboration_boards SET revision = ?, manifest = ? WHERE id = ? AND revision = ?').run(revision, JSON.stringify(patch.manifest), boardId, patch.revision);
         if (updated.changes !== 1) fail(409, 'Доска изменилась.');
         checkQuota(boardId);
@@ -302,8 +405,10 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
         committed = true;
         return { revision };
       });
+      succeeded = true;
       if (committed) notify({ event: 'board.patch', boardId, data: { boardId, usedBytes: usage(boardId), revision: result.revision, manifest: patch.manifest, upserts: patch.upserts.map(entity => ({ ...entity, revision: result.revision })), deletes: patch.deletes } });
       return result;
+      } finally { await staged.cleanup(succeeded); }
     },
     delete(uid: string, boardId: string) {
       identifier.parse(boardId);
@@ -321,16 +426,24 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
       notify({ event: 'boards.changed', boardId, uids });
       return { ok: true };
     },
-    rename(uid: string, boardId: string, name: Envelope) {
+    rename(uid: string, boardId: string, name: Envelope, expectedKey?: string) {
       const value = nameSchema.parse(name);
-      const uids = transaction(() => { owner(uid, boardId); db.prepare('UPDATE collaboration_boards SET name = ? WHERE id = ?').run(JSON.stringify(value), boardId); checkQuota(boardId); return memberIds(boardId); });
+      const uids = transaction(() => {
+        owner(uid, boardId);
+        const member = db.prepare('SELECT wrapped_key FROM collaboration_members WHERE board_id = ? AND uid = ?').get(boardId, uid) as { wrapped_key: string };
+        if (expectedKey !== undefined && expectedKey !== member.wrapped_key) fail(409, 'Доска изменилась. Загрузите актуальную версию.');
+        db.prepare('UPDATE collaboration_boards SET name = ? WHERE id = ?').run(JSON.stringify(value), boardId); checkQuota(boardId); return memberIds(boardId);
+      });
       notify({ event: 'boards.changed', boardId, uids });
       return { ok: true };
     },
-    invite(uid: string, boardId: string, target: string, memberRole: 'editor' | 'viewer', wrappedKey: string) {
+    invite(uid: string, boardId: string, target: string, memberRole: 'editor' | 'viewer', wrappedKey: string, proof?: Envelope, revision?: number, expectedKey?: string) {
       identifier.parse(target); z.enum(['editor', 'viewer']).parse(memberRole); wrappedKeySchema.parse(wrappedKey);
+      if (proof) nameSchema.parse(proof);
       const uids = transaction(() => {
         owner(uid, boardId);
+        if (revision !== undefined && board(boardId).revision !== revision) fail(409, 'Доска изменилась. Загрузите актуальную версию.');
+        if (expectedKey !== undefined && entry(uid, boardId).wrappedKey !== expectedKey) fail(409, 'Доска изменилась. Загрузите актуальную версию.');
         if (target === uid) fail(400, 'Нельзя пригласить себя.');
         if (!identity(target)) fail(404, 'Пользователь ещё не создал ключи.');
         const existing = db.prepare('SELECT uid, color FROM collaboration_members WHERE board_id = ?').all(boardId) as { uid: string; color: number }[];
@@ -339,6 +452,7 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
         const color = member?.color ?? Array.from({ length: 10 }, (_, index) => index).find(index => !existing.some(item => item.color === index))!;
         db.prepare(`INSERT INTO collaboration_members (board_id, uid, role, wrapped_key, color) VALUES (?, ?, ?, ?, ?) ON CONFLICT(board_id, uid)
           DO UPDATE SET role=excluded.role, wrapped_key=excluded.wrapped_key`).run(boardId, target, memberRole, wrappedKey, color);
+        if (proof) db.prepare('INSERT INTO collaboration_verified_keys VALUES (?, ?, ?) ON CONFLICT(board_id, uid) DO UPDATE SET proof=excluded.proof').run(boardId, target, JSON.stringify(proof));
         return memberIds(boardId);
       });
       notify({ event: 'boards.changed', boardId, uids: [target] });
@@ -348,8 +462,50 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
     color(uid: string, boardId: string): number {
       return (db.prepare('SELECT color FROM collaboration_members WHERE board_id = ? AND uid = ?').get(boardId, uid) as { color: number } | undefined)?.color ?? 0;
     },
-    members(uid: string, boardId: string): { uid: string; role: BoardRole; color: number }[] {
-      return transaction(() => { owner(uid, boardId); return db.prepare('SELECT uid, role, color FROM collaboration_members WHERE board_id = ? ORDER BY color').all(boardId) as { uid: string; role: BoardRole; color: number }[]; });
+    members(uid: string, boardId: string): { uid: string; role: BoardRole; color: number; proof: Envelope | null }[] {
+      return transaction(() => {
+        owner(uid, boardId);
+        const values = db.prepare('SELECT m.uid, m.role, m.color, k.proof FROM collaboration_members m LEFT JOIN collaboration_verified_keys k ON k.board_id = m.board_id AND k.uid = m.uid WHERE m.board_id = ? ORDER BY m.color').all(boardId) as { uid: string; role: BoardRole; color: number; proof: string | null }[];
+        return values.map(value => ({ ...value, proof: value.proof ? JSON.parse(value.proof) : null }));
+      });
+    },
+    async rotate(uid: string, boardId: string, input: unknown) {
+      owner(uid, boardId);
+      const value = z.object({ target: identifier, revision: z.number().int().min(1), mutationId: z.string().uuid(), expectedName: nameSchema, name: nameSchema, snapshot: snapshotMetadata, members: z.array(z.object({ uid: identifier, wrappedKey: wrappedKeySchema }).strict()).min(1).max(10) }).strict().parse(input);
+      if (new Set(value.members.map(member => member.uid)).size !== value.members.length) fail(400, 'Некорректный формат данных.');
+      await validateEnvelopes(value.snapshot.entities);
+      const requestHash = await mutationHash(value);
+      const staged = await stageEntities(value.snapshot.entities);
+      let committed = false;
+      let affected: string[] = [];
+      try {
+      const result = transaction((created, retired) => {
+        owner(uid, boardId);
+        const receipt = db.prepare('SELECT revision, request_hash FROM collaboration_mutations WHERE board_id = ? AND mutation_id = ?').get(boardId, value.mutationId) as { revision: number; request_hash: string } | undefined;
+        if (receipt) { if (receipt.request_hash !== requestHash) fail(409, 'Идентификатор изменения уже использован.'); return { revision: receipt.revision }; }
+        if (value.target === uid) fail(400, 'Нельзя удалить владельца.');
+        const existing = memberIds(boardId);
+        if (!existing.includes(value.target)) fail(404, 'Нет доступа к доске.');
+        const expected = existing.filter(id => id !== value.target).sort();
+        if (JSON.stringify(expected) !== JSON.stringify(value.members.map(member => member.uid).sort()) || board(boardId).revision !== value.revision || board(boardId).name !== JSON.stringify(value.expectedName)) fail(409, 'Доска изменилась. Загрузите актуальную версию.');
+        const previous = rows(boardId), nextIds = new Set(value.snapshot.entities.map(entity => entity.id));
+        const deletes = previous.filter(row => !nextIds.has(row.entity_id)).map(row => row.entity_id);
+        checkPolicy(boardId, 'owner', previous, value.snapshot.entities, deletes);
+        const revision = value.revision + 1;
+        writeEntities(boardId, revision, previous, value.snapshot.entities, deletes, created, retired, staged);
+        db.prepare('UPDATE collaboration_boards SET revision = ?, name = ?, manifest = ? WHERE id = ?').run(revision, JSON.stringify(value.name), JSON.stringify(value.snapshot.manifest), boardId);
+        for (const member of value.members) db.prepare('UPDATE collaboration_members SET wrapped_key = ? WHERE board_id = ? AND uid = ?').run(member.wrappedKey, boardId, member.uid);
+        db.prepare('DELETE FROM collaboration_verified_keys WHERE board_id = ? AND uid = ?').run(boardId, value.target);
+        db.prepare('DELETE FROM collaboration_members WHERE board_id = ? AND uid = ?').run(boardId, value.target);
+        checkQuota(boardId);
+        db.prepare('INSERT INTO collaboration_mutations VALUES (?, ?, ?, ?)').run(boardId, value.mutationId, revision, requestHash);
+        affected = existing;
+        return { revision };
+      });
+      committed = true;
+      if (affected.length) { notify({ event: 'board.access', boardId, uids: affected }); notify({ event: 'boards.changed', boardId, uids: affected }); }
+      return result;
+      } finally { await staged.cleanup(committed); }
     },
     removeMember(uid: string, boardId: string, target: string) {
       identifier.parse(target);
