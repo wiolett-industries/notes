@@ -1,3 +1,5 @@
+import { boardModeShortcut } from './board-hotkeys';
+import { t, quotaMessage, localizeError, countLabel, isStorageLimit } from './locale';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
 import { colors, GRID_SIZE, MAX_BOARD_BYTES, type BoardData, type NoteData, type NoteColor, type ConnectionData, type GroupData } from '@quiet/shared';
@@ -13,10 +15,10 @@ import { mentionConnections, mentionIds } from './markdown';
 import './board-cursors.css';
 import { participantColor as peerColor } from './participant-color';
 
-const labels: Record<NoteColor, string> = { sand: 'Песочный', sage: 'Шалфей', rose: 'Розовый', lavender: 'Лавандовый', sky: 'Голубой' };
+const labels: Record<NoteColor, string> = { sand: t("Песочный"), sage: t("Шалфей"), rose: t("Розовый"), lavender: t("Лавандовый"), sky: t("Голубой") };
 type DragPosition = { id: string; x: number; y: number; width: number; height: number };
 type Props = { board: BoardData; onChange: (board: BoardData) => void; onStorageLimit?: () => void; locked?: boolean; noteBusy?: string | null; onToggleLock: (id: string) => Promise<void>; actions?: ComponentChildren; clipboardKey: CryptoKey; accountId: string; interactionBlocked?: boolean; role?: 'owner' | 'editor' | 'viewer'; peers?: { id: string; uid: string; role: string; color?: number; x: number; y: number; selection?: string[] }[]; onCursor?: (point: Point | null) => void; onSelection?: (ids: string[]) => void; onDrag?: (positions: DragPosition[] | null) => void; dragPreviews?: Record<string, Omit<DragPosition, 'id'>> };
-type Gesture = { kind: 'pan' | 'note' | 'resize' | 'connect' | 'selection' | 'group'; pointer: number; start: Point; camera: BoardData['camera']; note?: NoteData; edge?: string; moved?: NoteData[]; bounds?: ReturnType<typeof groupBounds>; selection?: string[]; group?: string; speedSample?: Point & { time: number }; detached?: Map<string, string> };
+type Gesture = { kind: 'pan' | 'note' | 'resize' | 'connect' | 'selection' | 'group'; pointer: number; start: Point; camera: BoardData['camera']; note?: NoteData; edge?: string; moved?: NoteData[]; bounds?: ReturnType<typeof groupBounds>; selection?: string[]; group?: string; speedSample?: Point & { time: number }; fastSamples?: number; fastDistance?: number; detached?: Map<string, string> };
 type Draft = { source: string; point: Point; target?: string };
 export function Board({ board: incoming, onChange, onStorageLimit, locked = false, noteBusy = null, onToggleLock, actions, clipboardKey, accountId, interactionBlocked = false, role = 'owner', peers = [], onCursor, onSelection, onDrag, dragPreviews }: Props) {
   const board = incoming;
@@ -78,7 +80,7 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
   const lastPaste = useRef({ signature: '', count: 0 });
   const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState('');
-  useEffect(() => { if (notice.includes('300 МБ') && onStorageLimit) { onStorageLimit(); setNotice(''); } }, [notice]);
+  useEffect(() => { if (isStorageLimit(notice) && onStorageLimit) { onStorageLimit(); setNotice(''); } }, [notice]);
   const [lastDeleted, setLastDeleted] = useState<{ id: string; notes: NoteData[]; connections: ConnectionData[]; groups: GroupData[] } | null>(null);
   const pointers = useRef(new Map<number, Point>());
   const gesture = useRef<Gesture | null>(null);
@@ -209,9 +211,9 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
         const unchanged = new Set(current.current.notes.filter(note => canEdit(note) && copied.get(note.id) === JSON.stringify(note)).map(note => note.id));
         update(cleanGroups({ ...current.current, notes: current.current.notes.filter(note => !unchanged.has(note.id)) }));
         clearSelection(); setLastDeleted(null);
-        if (unchanged.size !== ids.length) setNotice('Изменённые во время копирования заметки оставлены на доске.');
+        if (unchanged.size !== ids.length) setNotice(t("Изменённые во время копирования заметки оставлены на доске."));
       }
-    } catch { if (alive.current) setNotice(cut ? 'Не удалось записать заметки в буфер обмена. Вырезание отменено.' : 'Не удалось записать заметки в буфер обмена.'); }
+    } catch { if (alive.current) setNotice(cut ? t("Не удалось записать заметки в буфер обмена. Вырезание отменено.") : t("Не удалось записать заметки в буфер обмена.")); }
     finally { clipboardBusy.current = false; if (alive.current) setClipboardWorking(false); }
   }
   async function pasteNotes(text: string) {
@@ -221,7 +223,7 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
     try {
       const copied = await readSelection(clipboardKey, accountId, text);
       if (!canWrite()) return;
-      if (access.current === 'editor' && copied.notes.some(note => note.sealed || note.pinned)) { setNotice('Нельзя вставить защищённые заметки.'); return; }
+      if (access.current === 'editor' && copied.notes.some(note => note.sealed || note.pinned)) { setNotice(t("Нельзя вставить защищённые заметки.")); return; }
       if (!alive.current || !copied.notes.length) return;
       const rect = root.current!.getBoundingClientRect(), cam = current.current.camera;
       const left = Math.min(...copied.notes.map(n => n.x)), top = Math.min(...copied.notes.map(n => n.y));
@@ -232,21 +234,29 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
       const pasted = pasteSelection(current.current, copied, offset);
       update(pasted.board); clearSelection(); setSelectedIds(pasted.ids); chooseMode('select');
       lastPaste.current = { signature, count };
-    } catch (error) { if (alive.current) setNotice(error instanceof Error ? error.message : 'Не удалось вставить заметки.'); }
+    } catch (error) { if (alive.current) setNotice(error instanceof Error ? localizeError(error) : t("Не удалось вставить заметки.")); }
     finally { clipboardBusy.current = false; if (alive.current) setClipboardWorking(false); }
   }
   function endpoints(): Endpoint[] { return [...groupBounds(current.current.groups, current.current.notes), ...current.current.notes]; }
   function connectionTarget(e: PointerEvent, source: string) {
     const element = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('[data-note], [data-group]');
     const id = element?.dataset.note ?? element?.dataset.group;
-    return (id !== source && endpoints().find(n => n.id === id)) || magneticTarget(endpoints(), world({ x: e.clientX, y: e.clientY }), source, current.current.camera.zoom);
+    const parent = current.current.groups.find(group => group.noteIds.includes(source))?.id;
+    if (id === source || (parent && id === parent)) return undefined;
+    const targets = endpoints().filter(endpoint => endpoint.id !== parent), point = world({ x: e.clientX, y: e.clientY });
+    const direct = targets.find(endpoint => endpoint.id === id);
+    if (direct) return direct;
+    const anchor = targets.find(endpoint => endpoint.id === source);
+    if (anchor && contains(anchor, point)) return undefined;
+    return magneticTarget(targets, point, source, current.current.camera.zoom);
   }
   function makeGroup() {
     const ids = selectedIds.filter(id => noteIndex().byId.has(id));
+    if (ids.length > 1000) return;
     if (!canGroup(ids)) return;
     if (ids.length < 2) return;
-    if (current.current.groups.length >= 500) { setNotice('На доске уже 500 групп.'); return; }
-    const group = { id: crypto.randomUUID(), title: 'Группа', noteIds: ids };
+    if (current.current.groups.length >= 500) { setNotice(t("На доске уже 500 групп.")); return; }
+    const group = { id: crypto.randomUUID(), title: t("Группа"), noteIds: ids };
     const groupedIds = new Set(ids);
     const groups = current.current.groups.map(g => ({ ...g, noteIds: g.noteIds.filter(id => !groupedIds.has(id)) }));
     update(cleanGroups({ ...current.current, groups: [...groups, group] }));
@@ -262,7 +272,7 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
     const { byId } = noteIndex();
     const assigned = new Set<string>();
     const additions = new Map<string, string[]>();
-    const eligibleBounds = bounds.filter(rect => canGroup(rect.noteIds));
+    const eligibleBounds = bounds.filter(rect => canGroup(rect.noteIds) && current.current.groups.some(group => group.id === rect.id));
     for (const id of ids) {
       const note = byId.get(id);
       if (!note || !canGroup([id])) continue;
@@ -270,11 +280,14 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
       const point = center(note);
       let target: typeof bounds[number] | undefined;
       for (const rect of eligibleBounds) if (rect.id !== detached?.get(id) && contains(rect, point) && (!target || rect.width * rect.height < target.width * target.height)) target = rect;
+      if (detached && !target) continue;
       assigned.add(id);
       if (target) { const members = additions.get(target.id) ?? []; members.push(id); additions.set(target.id, members); }
     }
-    const groups = current.current.groups.map(group => ({ ...group, noteIds: [...group.noteIds.filter(id => !assigned.has(id)), ...(additions.get(group.id) ?? [])] }));
+    if (!assigned.size) return false;
+    const groups = current.current.groups.map(group => group.noteIds.some(id => assigned.has(id)) || additions.has(group.id) ? { ...group, noteIds: [...group.noteIds.filter(id => !assigned.has(id)), ...(additions.get(group.id) ?? [])] } : group);
     update(cleanGroups({ ...current.current, groups }));
+    return true;
   }
   function startEditing(id: string, field: 'title' | 'text') {
     if (hand || mode === 'connect' || locked || noteBusy === id) return;
@@ -296,11 +309,11 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
   }
   function add(point?: Point) {
     if (locked || access.current === 'viewer') return;
-    if (current.current.notes.length >= 10000) { setNotice('На доске уже 10000 заметок. Удалите ненужные, чтобы добавить новую.'); return; }
+    if (current.current.notes.length >= 10000) { setNotice(t("На доске уже 10000 заметок. Удалите ненужные, чтобы добавить новую.")); return; }
     const rect = root.current!.getBoundingClientRect();
     const p = point ?? { x: rect.width / 2, y: rect.height / 2 };
     const cam = current.current.camera;
-    const note: NoteData = { id: crypto.randomUUID(), title: 'Заметка', kind: 'text', width: 272, height: 248, text: '', pinned: false, mentions: [], color: colors[current.current.notes.length % colors.length], x: clamp(snap((p.x - cam.x) / cam.zoom - 136), -1e9, 1e9), y: clamp(snap((p.y - cam.y) / cam.zoom - 100), -1e9, 1e9) };
+    const note: NoteData = { id: crypto.randomUUID(), title: t("Заметка"), kind: 'text', width: 272, height: 248, text: '', pinned: false, mentions: [], color: colors[current.current.notes.length % colors.length], x: clamp(snap((p.x - cam.x) / cam.zoom - 136), -1e9, 1e9), y: clamp(snap((p.y - cam.y) / cam.zoom - 100), -1e9, 1e9) };
     const bounds = groupBounds(current.current.groups, current.current.notes);
     update({ ...current.current, notes: [...current.current.notes, note] }); assignGroups([note.id], bounds); select(note.id); setSelectedIds([]); chooseMode('select');
   }
@@ -328,10 +341,11 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
   function connect(source: string, target: string) {
     if (access.current === 'viewer') return;
     if (source === target) return;
+    if (current.current.groups.some(group => group.id === target && group.noteIds.includes(source))) return;
     const edges = current.current.connections;
     const existing = edges.find(edge => edge.source === source && edge.target === target);
     if (existing) { selectEdge(existing.id); setConnection(null); return; }
-    if (edges.length >= 40000) { setNotice('На доске уже 40000 связей.'); setConnection(null); return; }
+    if (edges.length >= 40000) { setNotice(t("На доске уже 40000 связей.")); setConnection(null); return; }
     const edge: ConnectionData = { id: crypto.randomUUID(), source, target, label: '', style: 'solid' };
     update({ ...current.current, connections: [...edges, edge] }); selectEdge(edge.id); select(null); setConnection(null);
   }
@@ -342,18 +356,18 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
       for (const [index, file] of files.entries()) {
         const decoded = await readImage(file);
         if (!alive.current || !canWrite()) return;
-        if (current.current.notes.length >= 10000) throw new Error('На доске уже 10000 заметок.');
+        if (current.current.notes.length >= 10000) throw new Error(t("На доске уже 10000 заметок."));
         const rect = root.current!.getBoundingClientRect(), cam = current.current.camera;
         const p = point ?? { x: (rect.width / 2 - cam.x) / cam.zoom, y: (rect.height / 2 - cam.y) / cam.zoom };
         const width = clamp(snap(decoded.ratio >= 1 ? 320 : 240), 160, 2048);
         const height = clamp(snap(width / decoded.ratio + 40), 120, 640);
         const note: NoteData = { id: crypto.randomUUID(), kind: 'image', title: file.name.slice(0, 240), text: '', pinned: false, mentions: [], color: 'sky', width, height, image: decoded.image, x: clamp(snap(p.x - width / 2 + index * 24), -1e9, 1e9), y: clamp(snap(p.y - height / 2 + index * 24), -1e9, 1e9) };
         const next = { ...current.current, notes: [...current.current.notes, note] };
-        if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error('На доске недостаточно места для картинки (лимит 300 МБ).');
+        if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error(quotaMessage(MAX_BOARD_BYTES));
         const bounds = groupBounds(current.current.groups, current.current.notes);
         update(next); assignGroups([note.id], bounds); select(note.id); setSelectedIds([]); chooseMode('select');
       }
-    } catch (error) { if (alive.current) setNotice(error instanceof Error ? error.message : 'Не удалось добавить картинку.'); }
+    } catch (error) { if (alive.current) setNotice(error instanceof Error ? localizeError(error) : t("Не удалось добавить картинку.")); }
     finally { if (alive.current) setImageBusy(false); if (imageInput.current) imageInput.current.value = ''; }
   }
   function fit() {
@@ -413,7 +427,7 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
     return () => { window.removeEventListener('paste', paste); window.removeEventListener('copy', copy); window.removeEventListener('cut', copy); };
   }, [locked, imageBusy, interactionBlocked, selected, selectedIds, selectedGroup, noteBusy, role]);
   useEffect(() => {
-    const editing = (e: KeyboardEvent) => (e.target as HTMLElement).matches('textarea, input, [contenteditable]');
+    const editing = (e: KeyboardEvent) => (e.target as HTMLElement).closest('textarea, input, select, [contenteditable]');
     function down(e: KeyboardEvent) {
       if (locked || interactionBlocked) return;
       const command = e.ctrlKey || e.metaKey;
@@ -432,6 +446,8 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
         }
         return;
       }
+      const shortcut = boardModeShortcut(e, access.current === 'viewer');
+      if (shortcut) { e.preventDefault(); if (!e.repeat) chooseMode(shortcut); return; }
       if (e.code === 'Space') { e.preventDefault(); setSpace(true); }
       if (e.key === 'Escape') { clearSelection(); setSearchOpen(false); }
       if (e.code === 'KeyN' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); add(); }
@@ -540,13 +556,17 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
         if (elapsed >= 24) {
           const distance = Math.hypot(e.clientX - g.speedSample.x, e.clientY - g.speedSample.y);
           // Screen-space speed makes the gesture consistent at every board zoom.
-          if (elapsed <= 100 && distance >= 24 && distance / elapsed > 1.2) {
+          const fast = elapsed <= 80 && distance / elapsed >= 2;
+          g.fastSamples = fast ? (g.fastSamples ?? 0) + 1 : 0;
+          g.fastDistance = fast ? (g.fastDistance ?? 0) + distance : 0;
+          if (g.fastSamples >= 3 && g.fastDistance >= 120) {
             const movedIds = new Set(g.moved.map(note => note.id));
             const groups = current.current.groups.map(group => ({ ...group, noteIds: group.noteIds.filter(id => {
               if (!movedIds.has(id) || !canGroup(group.noteIds)) return true;
               g.detached!.set(id, group.id); return false;
             }) }));
             update(cleanGroups({ ...current.current, groups }));
+            g.fastSamples = 0; g.fastDistance = 0;
           }
           g.speedSample = { x: e.clientX, y: e.clientY, time: e.timeStamp };
         }
@@ -556,6 +576,10 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
         const original = moved.get(note.id);
         return original && canMove(note) ? { ...note, x: clamp(snap(original.x + dx / g.camera.zoom), -1e9, 1e9), y: clamp(snap(original.y + dy / g.camera.zoom), -1e9, 1e9) } : note;
       }) });
+      if (g.kind === 'note' && g.bounds && assignGroups(g.moved.map(note => note.id), g.bounds, g.detached)) {
+        g.fastSamples = 0; g.fastDistance = 0;
+        g.speedSample = { x: e.clientX, y: e.clientY, time: e.timeStamp };
+      }
       previewDrag(g.moved.map(note => note.id));
     }
     else camera({ ...g.camera, x: g.camera.x + dx, y: g.camera.y + dy });
@@ -587,7 +611,9 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
   const viewport = useMemo<Rect>(() => ({ x: (-cam.x - 300) / cam.zoom, y: (-cam.y - 300) / cam.zoom,
     width: ((viewportSize.width || 1024) + 600) / cam.zoom, height: ((viewportSize.height || 768) + 600) / cam.zoom }), [cam.x, cam.y, cam.zoom, viewportSize]);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const retainedNotes = new Set([selected, editing?.id, noteBusy, draft?.source, draft?.target, gesture.current?.note?.id, ...(gesture.current?.moved?.map(note => note.id) ?? [])]);
+  // Only the pointer's anchor must survive culling, even when a drag moves
+  // thousands of selected notes. Offscreen selection never forces mounting.
+  const retainedNotes = new Set([selected, editing?.id, noteBusy, draft?.source, draft?.target, gesture.current?.note?.id]);
   const visualNotes = useMemo(() => {
     if (!dragPreviews || !Object.keys(dragPreviews).length) return board.notes;
     return board.notes.map(note => {
@@ -604,7 +630,7 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
   const routed = useMemo(() => routePreparedConnections(preparedRoutes, viewport, new Set([selectedEdge, editingEdge].filter((id): id is string => Boolean(id)))), [preparedRoutes, viewport, selectedEdge, editingEdge]);
   const draftSource = connectionEndpoints.find(n => n.id === draft?.source);
   const draftPath = draft && draftSource ? draftConnection(draftSource, draft.point, connectionEndpoints.find(n => n.id === draft.target)).path : undefined;
-  return <div ref={root} className={`board ${hand || space ? 'pan-mode' : ''} ${mode === 'connect' ? 'connect-mode' : ''} ${dragging ? 'dragging' : ''}`} tabIndex={locked ? -1 : 0} aria-label="Бесконечная доска" data-testid="board"
+  return <div ref={root} className={`board ${hand || space ? 'pan-mode' : ''} ${mode === 'connect' ? 'connect-mode' : ''} ${dragging ? 'dragging' : ''}`} tabIndex={locked ? -1 : 0} aria-label={t("Бесконечная доска")} data-testid="board"
     style={{ backgroundSize: `${24 * cam.zoom}px ${24 * cam.zoom}px, ${GRID_SIZE * cam.zoom}px ${GRID_SIZE * cam.zoom}px`, backgroundPosition: `${cam.x}px ${cam.y}px`, '--micro-opacity': cam.zoom >= .65 ? '1' : '0' }}
     onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} onPointerLeave={() => onCursor?.(null)}
     onDragOver={e => { if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = !locked && writable ? 'copy' : 'none'; } }}
@@ -613,9 +639,10 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
     <input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif" multiple hidden onChange={e => void addImages([...(e.currentTarget.files ?? [])])} />
     <div className={`world ${cameraFocusing ? 'camera-focusing' : ''}`} style={{ transform: `translate(${cam.x}px, ${cam.y}px) scale(${cam.zoom})` }}>
       {visibleGroups.map(group => <section key={group.id} data-group={group.id} className={`group-frame ${selectedGroup === group.id ? 'selected' : ''} ${draft?.target === group.id ? 'connection-target' : ''}`} style={{ left: group.x, top: group.y, width: group.width, height: group.height }}>
+        {mode === 'connect' && ['top', 'right', 'bottom', 'left'].map(side => <span className={`group-border group-border-${side}`} aria-hidden="true" />)}
         <div className="group-label" onDblClick={e => { e.stopPropagation(); if (canGroup(group.noteIds) && mode !== 'connect' && !hand) { editGroup(group.id); requestAnimationFrame(() => root.current?.querySelector<HTMLInputElement>(`[data-group="${group.id}"] input`)?.focus({ preventScroll: true })); } }}>
-          {editingGroup === group.id && canGroup(group.noteIds) ? <input aria-label="Название группы" maxLength={240} value={group.title} onInput={e => update({ ...current.current, groups: current.current.groups.map(g => g.id === group.id ? { ...g, title: e.currentTarget.value } : g) })} onBlur={() => editGroup(null)} onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') editGroup(null); }} /> : <span>{group.title || 'Группа'}</span>}
-          {selectedGroup === group.id && canGroup(group.noteIds) && <Button icon="close" label="Разгруппировать" onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={() => ungroup(group.id)} />}
+          {editingGroup === group.id && canGroup(group.noteIds) ? <input aria-label={t("Название группы")} maxLength={240} value={group.title} onInput={e => update({ ...current.current, groups: current.current.groups.map(g => g.id === group.id ? { ...g, title: e.currentTarget.value } : g) })} onBlur={() => editGroup(null)} onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') editGroup(null); }} /> : <span>{group.title || t("Группа")}</span>}
+          {selectedGroup === group.id && canGroup(group.noteIds) && <Button icon="close" label={t("Разгруппировать")} onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={() => ungroup(group.id)} />}
         </div>
       </section>)}
       <Connections edges={routed} draft={writable ? draftPath : undefined} selected={selectedEdge} editing={writable ? editingEdge : null} readOnly={!writable}
@@ -623,29 +650,29 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
         select={id => { selectEdge(id); select(null); setEditing(null); }} edit={id => { if (access.current !== 'viewer') editEdge(id); }} remove={removeEdge}
         change={(id, label) => update({ ...current.current, connections: current.current.connections.map(edge => edge.id === id ? { ...edge, label } : edge) })} />
       {visibleNotes.map(note => <article key={note.id} data-note={note.id} className={`note pigment-${note.color} ${remoteSelections.has(note.id) ? 'remote-selected' : ''} ${note.pinned ? 'pinned-note' : ''} ${note.kind === 'image' ? 'image-note' : ''} ${note.sealed ? 'sealed-note' : ''} ${selectedSet.has(note.id) ? 'multi-selected' : ''} ${selected === note.id ? 'selected' : ''} ${draft?.target === note.id ? 'connection-target' : ''} ${draft?.source === note.id ? 'connection-source' : ''}`} style={{ transform: `translate(${note.x}px, ${note.y}px)`, width: note.width, height: note.height, '--peer-color': remoteSelections.get(note.id)?.color }} onFocusIn={() => select(note.id)}>
-        <div className="note-handle" aria-label="Заголовок заметки">
-          {canEdit(note) && editing?.id === note.id && editing.field === 'title' ? <input className="note-title" aria-label="Название заметки" value={note.title} maxLength={240} readOnly={noteBusy === note.id} onInput={e => patch(note.id, { title: e.currentTarget.value })} onBlur={() => setEditing(null)} onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') { e.stopPropagation(); setEditing(null); } }} /> : <span className="note-title" onDblClick={e => { e.stopPropagation(); startEditing(note.id, 'title'); }}>{note.title || 'Заметка'}</span>}
-          {note.kind === 'image' && note.image && !note.sealed && <Button className="note-download" icon="download" label="Скачать изображение" onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); const link = document.createElement('a'); link.href = note.image!; const extension = /^data:image\/(png|jpeg|webp|gif|avif);/.exec(note.image!)?.[1] ?? 'webp'; link.download = `${(note.title || 'image').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/\.(png|jpe?g|webp|gif|avif)$/i, '')}.${extension === 'jpeg' ? 'jpg' : extension}`; document.body.append(link); link.click(); link.remove(); }} />}
+        <div className="note-handle" aria-label={t("Заголовок заметки")}>
+          {canEdit(note) && editing?.id === note.id && editing.field === 'title' ? <input className="note-title" aria-label={t("Название заметки")} value={note.title} maxLength={240} readOnly={noteBusy === note.id} onInput={e => patch(note.id, { title: e.currentTarget.value })} onBlur={() => setEditing(null)} onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') { e.stopPropagation(); setEditing(null); } }} /> : <span className="note-title" onDblClick={e => { e.stopPropagation(); startEditing(note.id, 'title'); }}>{note.title || t("Заметка")}</span>}
+          {note.kind === 'image' && note.image && !note.sealed && <Button className="note-download" icon="download" label={t("Скачать изображение")} onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); const link = document.createElement('a'); link.href = note.image!; const extension = /^data:image\/(png|jpeg|webp|gif|avif);/.exec(note.image!)?.[1] ?? 'webp'; link.download = `${(note.title || 'image').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/\.(png|jpe?g|webp|gif|avif)$/i, '')}.${extension === 'jpeg' ? 'jpg' : extension}`; document.body.append(link); link.click(); link.remove(); }} />}
           <span className="grip"><Icon name="grip" size={16} /></span>
         </div>
         {note.sealed ? <div className="sealed-cover">
           <div className="sealed-placeholder" aria-hidden="true"><i /><i /><i /><i /><i /></div>
-          <Button className="unseal-button" icon={noteBusy === note.id ? undefined : 'lock'} label="Разблокировать заметку" disabled={role !== 'owner' || Boolean(noteBusy) || clipboardWorking} onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={() => { if (access.current === 'owner') void onToggleLock(note.id); }}>{noteBusy === note.id && <span className="spinner" />}</Button>
+          <Button className="unseal-button" icon={noteBusy === note.id ? undefined : 'lock'} label={t("Разблокировать заметку")} disabled={role !== 'owner' || Boolean(noteBusy) || clipboardWorking} onPointerDown={e => e.stopPropagation()} onDblClick={e => e.stopPropagation()} onClick={() => { if (access.current === 'owner') void onToggleLock(note.id); }}>{noteBusy === note.id && <span className="spinner" />}</Button>
         </div> : <>
-        {note.kind === 'image' ? <div className="note-image"><img src={note.image} alt={note.title} draggable={false} /></div> : <NoteBody note={note} notes={noteCatalog} editing={canEdit(note) && editing?.id === note.id && editing.field === 'text'} busy={noteBusy === note.id} change={text => patch(note.id, { text })} edit={() => startEditing(note.id, 'text')} done={() => setEditing(null)} follow={focusNote} />}
-        {note.kind === 'text' && <div className="note-footer"><span>{note.text.length ? `${note.text.length.toLocaleString('ru')} зн.` : ''}</span></div>}
+        {note.kind === 'image' ? <div className="note-image"><img src={note.image} alt={note.title} draggable={false} /></div> : <NoteBody note={note} notes={noteCatalog} editable={canEdit(note)} editing={canEdit(note) && editing?.id === note.id && editing.field === 'text'} busy={noteBusy === note.id} change={text => patch(note.id, { text })} edit={() => startEditing(note.id, 'text')} done={() => setEditing(null)} follow={focusNote} />}
+        {note.kind === 'text' && <div className="note-footer"><span>{note.text.length ? countLabel('characters', note.text.length) : ''}</span></div>}
         </>}
-        <div className="note-tools" aria-label="Параметры заметки">
+        <div className="note-tools" aria-label={t("Параметры заметки")}>
           {note.kind === 'text' && !note.sealed && <div className="swatches">{colors.map(color => <button type="button" className={`swatch pigment-${color}`} aria-label={labels[color]} data-tooltip={labels[color]} disabled={!canEdit(note) || noteBusy === note.id} aria-pressed={note.color === color} onClick={() => patch(note.id, { color })}>{note.color === color && <Icon name="check" size={12} />}</button>)}</div>}
-          {!note.sealed && <Button icon="lock" label="Заблокировать заметку" disabled={role !== 'owner' || Boolean(noteBusy) || clipboardWorking} onClick={() => { if (access.current !== 'owner') return; setEditing(null); setLastDeleted(null); gesture.current = null; void onToggleLock(note.id); }} />}
-          <Button icon={note.pinned ? 'unpin' : 'pin'} label={note.pinned ? 'Снять фиксацию заметки' : 'Зафиксировать заметку'} aria-pressed={Boolean(note.pinned)} className={note.pinned ? 'pin-active' : ''} disabled={role !== 'owner' || noteBusy === note.id} onClick={() => { if (access.current !== 'owner') return; gesture.current = null; patch(note.id, { pinned: !note.pinned }); }} />
-          <Button icon="trash" label="Удалить заметку" className="delete-note" disabled={!canEdit(note) || noteBusy === note.id} onClick={() => remove(note.id)} />
+          {!note.sealed && <Button icon="lock" label={t("Заблокировать заметку")} disabled={role !== 'owner' || Boolean(noteBusy) || clipboardWorking} onClick={() => { if (access.current !== 'owner') return; setEditing(null); setLastDeleted(null); gesture.current = null; void onToggleLock(note.id); }} />}
+          <Button icon={note.pinned ? 'unpin' : 'pin'} label={note.pinned ? t("Снять фиксацию заметки") : t("Зафиксировать заметку")} aria-pressed={Boolean(note.pinned)} className={note.pinned ? 'pin-active' : ''} disabled={role !== 'owner' || noteBusy === note.id} onClick={() => { if (access.current !== 'owner') return; gesture.current = null; patch(note.id, { pinned: !note.pinned }); }} />
+          <Button icon="trash" label={t("Удалить заметку")} className="delete-note" disabled={!canEdit(note) || noteBusy === note.id} onClick={() => remove(note.id)} />
         </div>
         {canMove(note) && (mode === 'select' || mode === 'group') && ['n', 'e', 's', 'w', 'ne', 'se', 'sw', 'nw'].map(edge => <span className={`resize-handle resize-${edge}`} data-resize={edge} aria-hidden="true" />)}
       </article>)}
       {visibleNotes.map(note => {
         const remote = remoteSelections.get(note.id);
-        return remote && <span key={note.id} className="board-remote-selection-label" aria-label={`Выбрали: ${remote.uids.map(uid => uid.slice(0, 8)).join(', ')}`} style={{ left: note.x, top: note.y, '--peer-color': remote.color }}>{remote.label}</span>;
+        return remote && <span key={note.id} className="board-remote-selection-label" aria-label={t('Выбрали: {users}', { users: remote.uids.map(uid => uid.slice(0, 8)).join(', ') })} style={{ left: note.x, top: note.y, '--peer-color': remote.color }}>{remote.label}</span>;
       })}
     </div>
     {peers.length > 0 && <div className="board-peer-cursors" aria-hidden="true">
@@ -656,28 +683,28 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
     {selectionRect && <div className="selection-rect" aria-hidden="true" style={{ left: selectionRect.x * cam.zoom + cam.x, top: selectionRect.y * cam.zoom + cam.y, width: selectionRect.width * cam.zoom, height: selectionRect.height * cam.zoom }} />}
     {!locked && <>
       <div className="board-bottom">
-        <div className="toolbar floating" role="toolbar" aria-label="Инструменты доски">
-          <Button icon="cursor" label="Выбирать и перемещать заметки" className={mode === 'select' ? 'active' : ''} aria-pressed={mode === 'select'} onClick={() => chooseMode('select')} />
-          <Button icon="hand" label="Перемещать доску" className={hand ? 'active' : ''} aria-pressed={hand} onClick={() => chooseMode('hand')} />
-          <Button icon="connect" label="Создавать связи" className={mode === 'connect' ? 'active' : ''} aria-pressed={mode === 'connect'} disabled={!writable} onClick={() => chooseMode('connect')} />
-          <Button icon="group" label="Сгруппировать выделенные заметки (G)" className={mode === 'group' ? 'active' : ''} aria-pressed={mode === 'group'} disabled={selectedIds.length < 2 || !canGroup(selectedIds)} onClick={makeGroup} />
+        <div className="toolbar floating" role="toolbar" aria-label={t("Инструменты доски")}>
+          <Button icon="cursor" label={t("Выбирать и перемещать заметки (V)")} className={mode === 'select' ? 'active' : ''} aria-pressed={mode === 'select'} onClick={() => chooseMode('select')} />
+          <Button icon="hand" label={t("Перемещать доску (H)")} className={hand ? 'active' : ''} aria-pressed={hand} onClick={() => chooseMode('hand')} />
+          <Button icon="connect" label={t("Создавать связи (C)")} className={mode === 'connect' ? 'active' : ''} aria-pressed={mode === 'connect'} disabled={!writable} onClick={() => chooseMode('connect')} />
+          <Button icon="group" label={t("Сгруппировать выделенные заметки (G)")} className={mode === 'group' ? 'active' : ''} aria-pressed={mode === 'group'} disabled={selectedIds.length < 2 || selectedIds.length > 1000 || !canGroup(selectedIds)} onClick={makeGroup} />
           <span className="tool-divider" />
-          <Button icon="plus" label="Добавить заметку (N)" className="add-note" disabled={!writable} onClick={() => add()}><span>Заметка</span></Button>
-          <Button icon="image" label="Добавить картинку" disabled={!writable || imageBusy} onClick={() => imageInput.current?.click()} />
-          <Button icon="search" label="Поиск (Ctrl/⌘ F)" className={searchOpen ? 'active' : ''} aria-expanded={searchOpen} onClick={openSearch} />
+          <Button icon="plus" label={t("Добавить заметку (N)")} className="add-note" disabled={!writable} onClick={() => add()}><span>{t("Заметка")}</span></Button>
+          <Button icon="image" label={t("Добавить картинку")} disabled={!writable || imageBusy} onClick={() => imageInput.current?.click()} />
+          <Button icon="search" label={t("Поиск (Ctrl/⌘ F)")} className={searchOpen ? 'active' : ''} aria-expanded={searchOpen} onClick={openSearch} />
           <span className="tool-divider" />
-          <Button icon="minus" label="Уменьшить масштаб" onClick={() => zoomTo(cam.zoom / 1.2)} disabled={cam.zoom <= .15} />
-          <button type="button" className="zoom-value" aria-label="Масштаб 100%" onClick={() => zoomTo(1)}>{Math.round(cam.zoom * 100)}%</button>
-          <Button icon="plus" label="Увеличить масштаб" onClick={() => zoomTo(cam.zoom * 1.2)} disabled={cam.zoom >= 3} />
-          <Button icon="fit" label="Показать все заметки (0)" onClick={fit} />
+          <Button icon="minus" label={t("Уменьшить масштаб")} onClick={() => zoomTo(cam.zoom / 1.2)} disabled={cam.zoom <= .15} />
+          <button type="button" className="zoom-value" aria-label={t("Масштаб 100%")} onClick={() => zoomTo(1)}>{Math.round(cam.zoom * 100)}%</button>
+          <Button icon="plus" label={t("Увеличить масштаб")} onClick={() => zoomTo(cam.zoom * 1.2)} disabled={cam.zoom >= 3} />
+          <Button icon="fit" label={t("Показать все заметки (0)")} onClick={fit} />
         </div>
-        <div className="toolbar floating board-actions" role="toolbar" aria-label="Сохранение и доступ">{actions}</div>
+        <div className="toolbar floating board-actions" role="toolbar" aria-label={t("Сохранение и доступ")}>{actions}</div>
       </div>
       {searchOpen && <SearchPopover query={searchQuery} count={searchMatches.length} index={Math.min(searchIndex, Math.max(0, searchMatches.length - 1))} change={value => { setSearchQuery(value); setSearchIndex(0); }} step={stepSearch} close={closeSearch} />}
       {lastDeleted && lastDeleted.notes.some(canEdit) && <UndoToast key={lastDeleted.id} count={lastDeleted.notes.length} dismiss={() => setLastDeleted(null)} undo={() => {
         const existing = new Set(current.current.notes.map(note => note.id));
         const restored = lastDeleted.notes.filter(note => canEdit(note) && !existing.has(note.id));
-        if (current.current.notes.length + restored.length > 10000) { setNotice('На доске уже 10000 заметок.'); return; }
+        if (current.current.notes.length + restored.length > 10000) { setNotice(t("На доске уже 10000 заметок.")); return; }
         const notes = [...current.current.notes, ...restored], restoredIds = new Set(restored.map(note => note.id));
         let groups = current.current.groups;
         for (const previous of lastDeleted.groups) {
@@ -689,7 +716,7 @@ export function Board({ board: incoming, onChange, onStorageLimit, locked = fals
         for (const edge of lastDeleted.connections) if (!edges.has(edge.id)) edges.set(edge.id, edge);
         update(cleanGroups({ ...current.current, notes, groups, connections: [...edges.values()].slice(0, 40000) })); setLastDeleted(null);
       }} />}
-      {notice && <div className="undo-toast floating" role="alert">{notice}<Button icon="close" label="Закрыть уведомление" onClick={() => setNotice('')} /></div>}
+      {notice && <div className="undo-toast floating" role="alert">{notice}<Button icon="close" label={t("Закрыть уведомление")} onClick={() => setNotice('')} /></div>}
     </>}
   </div>;
 }

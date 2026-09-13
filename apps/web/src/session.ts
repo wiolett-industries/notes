@@ -1,3 +1,4 @@
+import { t, localizeError } from './locale';
 import { SESSION_SECONDS, type Vault } from '@quiet/shared';
 import { api, ApiError } from './api';
 import { decodeVault } from './entities';
@@ -90,7 +91,7 @@ export function refreshSessionOnActivity(accountId: string, expired: (message: s
     try {
       const result = await api<{ accountId: string; expiresIn: number }>('/session/refresh', { accountId });
       if (stopped) return;
-      if (result.accountId !== accountId || result.expiresIn !== SESSION_SECONDS) throw new Error('Некорректный ответ продления сессии.');
+      if (result.accountId !== accountId || result.expiresIn !== SESSION_SECONDS) throw new Error(t("Некорректный ответ продления сессии."));
       try { await extendSavedSession(accountId, Date.now() + result.expiresIn * 1000); }
       catch { /* An active session also works when browser storage is disabled. */ }
     } catch (error) {
@@ -98,7 +99,7 @@ export function refreshSessionOnActivity(accountId: string, expired: (message: s
       if (error instanceof ApiError && error.status === 401) {
         stopped = true;
         try { await forgetSession(); } catch { /* Remove saved access where possible. */ }
-        expired(error.message);
+        expired(localizeError(error));
       }
       // Network failures retry on later interaction, never on an idle timer.
     } finally { pending = false; }

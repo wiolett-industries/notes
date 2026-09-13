@@ -1,3 +1,4 @@
+import { t, quotaMessage } from './locale';
 import { z } from 'zod';
 import { boardSchema, encryptedEntitySchema, manifestSchema, MAX_BOARD_BYTES, MAX_ENTITIES, type BoardData, type DeltaWrite, type EncryptedEntity, type Envelope, type Vault } from '@quiet/shared';
 import { decryptBoard, fromBase64, toBase64 } from './crypto';
@@ -62,13 +63,13 @@ export async function prepareDelta(key: CryptoKey, accountId: string, revision: 
     const old = previous?.get(id);
     const access = shared ? accessFor(notes, address) : undefined;
     if (old && oldRecords?.has(address) && sameValue(data, oldRecords.get(address)) && (!shared || sameValue(access, accessFor(oldNotes!, address)))) {
-      size += old.bytes; if (size > MAX_BOARD_BYTES) throw new Error('Доска превышает 300 МБ.');
+      size += old.bytes; if (size > MAX_BOARD_BYTES) throw new Error(quotaMessage(MAX_BOARD_BYTES));
       index.set(id, old); continue;
     }
     const bytes = encoder.encode(JSON.stringify({ address, data }));
     size += bytes.byteLength;
     try {
-      if (size > MAX_BOARD_BYTES) throw new Error('Доска превышает 300 МБ. Удалите часть изображений.');
+      if (size > MAX_BOARD_BYTES) throw new Error(quotaMessage(MAX_BOARD_BYTES));
       const fingerprint = await digest(shared ? encoder.encode(JSON.stringify([JSON.stringify({ address, data }), access])) : bytes);
       if (old?.fingerprint === fingerprint) { index.set(id, old); continue; }
       const envelope = await encrypt(key, accountId, id, revision + 1, bytes);
@@ -89,7 +90,7 @@ export async function prepareDelta(key: CryptoKey, accountId: string, revision: 
 }
 export async function decodeVault(key: CryptoKey, vault: Vault, previous?: { board: BoardData; index: EntityIndex; vault: Vault }): Promise<{ board: BoardData; index: EntityIndex | null }> {
   if (vault.format !== 2) return { board: await decryptBoard(key, vault.accountId, vault.revision, vault.envelope), index: null };
-  if (!Number.isSafeInteger(vault.revision) || vault.revision < 1 || vault.entities.length > MAX_ENTITIES) throw new Error('Некорректная версия доски.');
+  if (!Number.isSafeInteger(vault.revision) || vault.revision < 1 || vault.entities.length > MAX_ENTITIES) throw new Error(t("Некорректная версия доски."));
   const manifest = manifestSchema.parse(vault.manifest);
   const bytes = await decrypt(key, vault.accountId, 'manifest', vault.revision, manifest);
   let integrity: z.infer<typeof integritySchema>;
@@ -102,35 +103,35 @@ export async function decodeVault(key: CryptoKey, vault: Vault, previous?: { boa
   const entities: EncryptedEntity[] = [];
   for (const raw of vault.entities) {
     const entity = encryptedEntitySchema.parse(raw);
-    if (entity.revision > vault.revision || index.has(entity.id)) throw new Error('Некорректный набор объектов доски.');
+    if (entity.revision > vault.revision || index.has(entity.id)) throw new Error(t("Некорректный набор объектов доски."));
     const old = cached?.get(entity.id), entry = previous?.index.get(entity.id);
     if (old && entry && old.revision === entity.revision && sameValue(old.envelope, entity.envelope) && sameValue(old.access, entity.access)) {
       index.set(entity.id, entry); reusable.add(entity.id);
     } else index.set(entity.id, { revision: entity.revision, hash: await cipherHash(entity.envelope), fingerprint: '', bytes: 0 });
     entities.push(entity);
   }
-  if (index.size !== integrity.count || await rootHash(index) !== integrity.root) throw new Error('Нарушена целостность доски. Загрузка отменена.');
+  if (index.size !== integrity.count || await rootHash(index) !== integrity.root) throw new Error(t("Нарушена целостность доски. Загрузка отменена."));
   const values = new Map<string, unknown>();
   for (const entity of entities) {
     if (reusable.has(entity.id) && entity.access && cachedValues?.has(entity.access.address)) { values.set(entity.access.address, cachedValues.get(entity.access.address)); continue; }
     const data = await decrypt(key, vault.accountId, entity.id, entity.revision, entity.envelope);
     try {
       const record = z.object({ address: z.string().max(100), data: z.unknown() }).strict().parse(JSON.parse(new TextDecoder().decode(data)));
-      if (await entityId(vault.accountId, record.address) !== entity.id || values.has(record.address)) throw new Error('Некорректный идентификатор объекта.');
-      if (entity.access && entity.access.address !== record.address) throw new Error('Нарушены права объекта доски.');
+      if (await entityId(vault.accountId, record.address) !== entity.id || values.has(record.address)) throw new Error(t("Некорректный идентификатор объекта."));
+      if (entity.access && entity.access.address !== record.address) throw new Error(t("Нарушены права объекта доски."));
       index.get(entity.id)!.fingerprint = await digest(entity.access ? encoder.encode(JSON.stringify([new TextDecoder().decode(data), entity.access])) : data);
       index.get(entity.id)!.bytes = data.byteLength;
       values.set(record.address, record.data);
     } finally { data.fill(0); }
   }
   function read(address: string) {
-    if (!values.has(address)) throw new Error('В доске отсутствует объект.');
+    if (!values.has(address)) throw new Error(t("В доске отсутствует объект."));
     return values.get(address);
   }
   function object(address: string) { return z.record(z.string(), z.unknown()).parse(read(address)); }
   const meta = metadataSchema.parse(read('meta'));
   const imageIds = new Set(meta.images), noteIds = new Set(meta.notes);
-  if (imageIds.size !== meta.images.length || meta.images.some(id => !noteIds.has(id)) || values.size !== 3 + meta.notes.length * 2 + meta.images.length + meta.groups.length + meta.connections.length) throw new Error('В доске обнаружены лишние объекты.');
+  if (imageIds.size !== meta.images.length || meta.images.some(id => !noteIds.has(id)) || values.size !== 3 + meta.notes.length * 2 + meta.images.length + meta.groups.length + meta.connections.length) throw new Error(t("В доске обнаружены лишние объекты."));
   const board = boardSchema.parse({
     version: 1, camera: read('camera'), lockKeys: read('lockKeys') ?? undefined,
     notes: meta.notes.map(id => ({ id, ...object(`note-content:${id}`), ...object(`note-layout:${id}`), ...(imageIds.has(id) ? object(`note-image:${id}`) : {}) })),
@@ -138,7 +139,7 @@ export async function decodeVault(key: CryptoKey, vault: Vault, previous?: { boa
   });
   const notes = new Map(board.notes.map(note => [note.id, note]));
   for (const entity of entities) {
-    if (entity.access && JSON.stringify(entity.access) !== JSON.stringify(accessFor(notes, entity.access.address))) throw new Error('Нарушены права заметки.');
+    if (entity.access && JSON.stringify(entity.access) !== JSON.stringify(accessFor(notes, entity.access.address))) throw new Error(t("Нарушены права заметки."));
   }
   return { board, index };
 }

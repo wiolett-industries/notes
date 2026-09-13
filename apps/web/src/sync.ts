@@ -1,3 +1,4 @@
+import { t, localizeError } from './locale';
 import { type BoardData, type NoteData, type DeltaWrite, type Vault } from '@quiet/shared';
 import { api, ApiError } from './api';
 import { encryptBoard } from './crypto';
@@ -78,21 +79,21 @@ export class BoardSync {
     } catch (error) {
       const conflict = error instanceof ApiError && error.status === 409;
       this.blocked = conflict;
-      this.emit(conflict ? 'conflict' : 'error', error instanceof Error && !(error instanceof TypeError) && !(error instanceof DOMException) ? error.message : 'Нет связи с сервером. Изменения остаются в этой вкладке.');
+      this.emit(conflict ? 'conflict' : 'error', error instanceof Error && !(error instanceof TypeError) && !(error instanceof DOMException) ? localizeError(error) : t("Нет связи с сервером. Изменения остаются в этой вкладке."));
       return false;
     }
   }
   private async sendPending() {
     const pending = this.uncertain!;
     const result = await this.request<{ revision: number }>('/board', pending.patch, 'PATCH');
-    if (result.revision !== pending.patch.revision + 1) throw new Error('Неожиданный ответ сервера.');
+    if (result.revision !== pending.patch.revision + 1) throw new Error(t("Неожиданный ответ сервера."));
     this.revision = result.revision; this.index = pending.index; this.saved = pending.board;
     this.needsScan = false; this.uncertain = undefined;
   }
   async reload(): Promise<BoardData> {
     if (this.active) await this.active;
     const remote = await this.request<Vault>('/board', undefined, 'GET');
-    if (remote.accountId !== this.unlocked.accountId) throw new Error('В другой вкладке открыта другая доска. Заблокируйте эту и войдите снова.');
+    if (remote.accountId !== this.unlocked.accountId) throw new Error(t("В другой вкладке открыта другая доска. Заблокируйте эту и войдите снова."));
     const { board, index } = await decodeVault(this.unlocked.key, remote);
     this.current = this.saved = board; this.index = index; this.needsScan = index === null;
     this.revision = remote.revision; this.blocked = false; this.uncertain = undefined;

@@ -1,3 +1,4 @@
+import { t, localizeError } from './locale';
 import { type BoardData, type BoardRole, type DeltaWrite, type EntityVault, type NoteData } from '@quiet/shared';
 import { decodeVault, prepareDelta, type EntityIndex } from './entities';
 import { encryptBoard } from './crypto';
@@ -58,7 +59,7 @@ export class SharedSync {
   state: 'saved' | 'saving' | 'error' = 'saved';
   constructor(private socket: BoardSocket, private key: CryptoKey, vault: EntityVault, board: BoardData, index: EntityIndex, public role: BoardRole, private changed: (board: BoardData) => void, private notify: (message: string) => void) {
     this.vault = vault; this.base = this.current = board; this.index = index;
-    this.unsubscribe.push(socket.on('board.patch', data => this.receive(data)), socket.on('connected', () => { void this.run(async () => { await socket.request('boards.watch', { boardId: this.vault.accountId }); await this.resync(); await this.save(); }); }), socket.on('disconnected', () => this.notify('Нет связи. Изменения остаются в этой вкладке.')));
+    this.unsubscribe.push(socket.on('board.patch', data => this.receive(data)), socket.on('connected', () => { void this.run(async () => { await socket.request('boards.watch', { boardId: this.vault.accountId }); await this.resync(); await this.save(); }); }), socket.on('disconnected', () => this.notify(t("Нет связи. Изменения остаются в этой вкладке."))));
   }
   receive(data: any) {
     if (data.boardId !== this.vault.accountId) return;
@@ -79,7 +80,7 @@ export class SharedSync {
     clearTimeout(this.timer); this.timer = setTimeout(() => { void this.run(() => this.save()); }, 180);
   }
   private async run(work: () => Promise<void>) {
-    this.chain = this.chain.then(async () => { if (!this.stopped) await work(); }).catch(error => { if (!this.stopped) { this.state = 'error'; this.notify(error instanceof Error ? error.message : 'Не удалось сохранить доску.'); } });
+    this.chain = this.chain.then(async () => { if (!this.stopped) await work(); }).catch(error => { if (!this.stopped) { this.state = 'error'; this.notify(error instanceof Error ? localizeError(error) : t("Не удалось сохранить доску.")); } });
     await this.chain;
   }
   private apply(patch: { revision: number; manifest: EntityVault['manifest']; upserts: any[]; deletes: string[] }): EntityVault {
@@ -109,7 +110,7 @@ export class SharedSync {
       const pending = this.pending;
       try {
         const result = await this.socket.request<{ revision: number }>('boards.patch', { boardId: this.vault.accountId, patch: pending.patch });
-        if (result.revision !== pending.patch.revision + 1) throw new Error('Некорректная версия доски.');
+        if (result.revision !== pending.patch.revision + 1) throw new Error(t("Некорректная версия доски."));
         // Own delta may already have been included in a reconnect snapshot.
         if (result.revision > this.vault.revision) {
           this.vault = this.apply({ ...pending.patch, revision: result.revision }); this.index = pending.index; this.base = pending.board;

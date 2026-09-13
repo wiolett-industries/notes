@@ -1,9 +1,11 @@
+import { t } from './locale';
 import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { NoteData } from '@quiet/shared';
-import { mentionText, renderMarkdown } from './markdown';
+import './task-lists.css';
+import { mentionText, renderMarkdown, toggleMarkdownTask } from './markdown';
 
 type Props = {
-  note: NoteData; notes: Pick<NoteData, 'id' | 'title'>[]; editing: boolean; busy: boolean;
+  note: NoteData; notes: Pick<NoteData, 'id' | 'title'>[]; editing: boolean; busy: boolean; editable?: boolean;
   change: (text: string) => void; edit: () => void; done: () => void; follow: (id: string) => void;
 };
 type Completion = { start: number; end: number; query: string };
@@ -26,7 +28,7 @@ export function markdownShortcut(text: string, start: number, end: number, code:
     else { before = after = selected.includes('`') ? '``' : '`'; }
   } else if (code === 'KeyX' && shift) before = after = '~~';
   else if (code === 'KeyK') {
-    const label = selected || 'текст';
+    const label = selected || t("текст");
     const inserted = `[${label}](https://)`;
     return { text: text.slice(0, start) + inserted + text.slice(end), start: start + label.length + 3, end: start + inserted.length - 1 };
   } else return null;
@@ -39,14 +41,15 @@ export function markdownShortcut(text: string, start: number, end: number, code:
   }
   return { text: text.slice(0, start) + before + selected + after + text.slice(end), start: start + before.length, end: end + before.length };
 }
-export function NoteBody({ note, notes, editing, busy, change, edit, done, follow }: Props) {
+export function NoteBody({ note, notes, editing, busy, editable = false, change, edit, done, follow }: Props) {
   const input = useRef<HTMLTextAreaElement>(null);
   const [mention, setMention] = useState<Completion | null>(null);
   const [active, setActive] = useState(0);
   const [place, setPlace] = useState<{ x: number; y: number; above: boolean }>({ x: 8, y: 36, above: false });
   const composing = useRef(false);
-  const html = useMemo(() => renderMarkdown(note.text, notes), [note.text, notes]);
-  const candidates = mention ? notes.filter(n => n.id !== note.id && (n.title || 'Заметка').toLocaleLowerCase().includes(mention.query)).slice(0, 8) : [];
+  const tasksEditable = editable && !busy && !note.sealed && !note.pinned;
+  const html = useMemo(() => renderMarkdown(note.text, notes, tasksEditable), [note.text, notes, tasksEditable]);
+  const candidates = mention ? notes.filter(n => n.id !== note.id && (n.title || t("Заметка")).toLocaleLowerCase().includes(mention.query)).slice(0, 8) : [];
   useLayoutEffect(() => { if (editing) input.current?.focus({ preventScroll: true }); else setMention(null); }, [editing]);
   function inspect() {
     const el = input.current;
@@ -77,14 +80,23 @@ export function NoteBody({ note, notes, editing, busy, change, edit, done, follo
     apply({ text: text.slice(0, mention.start) + value + text.slice(mention.end), start: mention.start + value.length, end: mention.start + value.length });
   }
   if (!editing) return <div className="note-content markdown-body" dangerouslySetInnerHTML={{ __html: html }}
-    onPointerDown={e => { if ((e.target as Element).closest('a')) e.stopPropagation(); }}
+    onPointerDown={e => { if ((e.target as Element).closest('a, .task-checkbox')) e.stopPropagation(); }}
     onClick={e => {
+      if ((e.target as Element).closest('.task-checkbox')) { e.stopPropagation(); return; }
       const link = (e.target as Element).closest<HTMLElement>('[data-note-ref]');
       if (link) { e.preventDefault(); e.stopPropagation(); follow(link.dataset.noteRef!); }
     }}
-    onDblClick={e => { e.stopPropagation(); if (!(e.target as Element).closest('a')) edit(); }} />;
+    onChange={e => {
+      const checkbox = (e.target as Element).closest<HTMLInputElement>('input.task-checkbox[data-task-line]');
+      if (!checkbox) return;
+      e.stopPropagation();
+      if (!tasksEditable) { checkbox.checked = checkbox.defaultChecked; return; }
+      const next = toggleMarkdownTask(note.text, Number(checkbox.dataset.taskLine), checkbox.checked);
+      if (next !== note.text) change(next);
+    }}
+    onDblClick={e => { e.stopPropagation(); if (!(e.target as Element).closest('a, .task-checkbox')) edit(); }} />;
   return <div className="note-editor">
-    <textarea ref={input} aria-label="Текст заметки" maxLength={50_000} value={note.text} spellcheck readOnly={busy}
+    <textarea ref={input} aria-label={t("Текст заметки")} maxLength={50_000} value={note.text} spellcheck readOnly={busy}
       aria-autocomplete="list" aria-expanded={Boolean(mention)} aria-controls={mention ? `mentions-${note.id}` : undefined}
       aria-activedescendant={mention && candidates.length ? `mention-${note.id}-${candidates[Math.min(active, candidates.length - 1)].id}` : undefined}
       onInput={e => { change(e.currentTarget.value); inspect(); }} onClick={inspect} onSelect={inspect}
@@ -103,8 +115,8 @@ export function NoteBody({ note, notes, editing, busy, change, edit, done, follo
         }
         if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(); }
       }} />
-    {mention && <div id={`mentions-${note.id}`} className={`mention-menu floating ${place.above ? 'above' : ''}`} role="listbox" aria-label="Упомянуть заметку" style={{ left: place.x, top: place.y }} onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onDblClick={e => e.stopPropagation()}>
-      {candidates.length ? candidates.map((target, index) => <button key={target.id} id={`mention-${note.id}-${target.id}`} type="button" role="option" aria-selected={index === active} onClick={() => pick(target)}><span>@</span><span>{target.title || 'Заметка'}</span><small>{target.id.slice(0, 4)}</small></button>) : <span className="mention-empty">Заметок не найдено</span>}
+    {mention && <div id={`mentions-${note.id}`} className={`mention-menu floating ${place.above ? 'above' : ''}`} role="listbox" aria-label={t("Упомянуть заметку")} style={{ left: place.x, top: place.y }} onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onDblClick={e => e.stopPropagation()}>
+      {candidates.length ? candidates.map((target, index) => <button key={target.id} id={`mention-${note.id}-${target.id}`} type="button" role="option" aria-selected={index === active} onClick={() => pick(target)}><span>@</span><span>{target.title || t("Заметка")}</span><small>{target.id.slice(0, 4)}</small></button>) : <span className="mention-empty">{t("Заметок не найдено")}</span>}
     </div>}
   </div>;
 }

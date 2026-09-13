@@ -1,8 +1,10 @@
+import { loadClientConfig } from './client-config';
+import { t, localizeError, applyDocumentLocale } from './locale';
 import { render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { emptyBoard, type BoardData } from '@quiet/shared';
 import { z } from 'zod';
-import { envelopeSchema, base64url, boardSchema, MAX_ENCRYPTED_BYTES } from '@quiet/shared';
+import { envelopeSchema, base64url, boardSchema, MAX_TRANSFER_BYTES } from '@quiet/shared';
 import { Board } from './Board';
 import { Button, Icon } from './ui';
 import { login, beginRegistration, finishRegistration, unlockNote, prepareNoteLocks, authError, type Unlocked } from './passkey';
@@ -96,7 +98,7 @@ function App() {
     return new Promise<T>((resolve, reject) => {
       pendingKey.current = {
         submit: async value => { const result = await operation(value); pendingKey.current = null; resolve(result); },
-        cancel: () => reject(new DOMException('Действие отменено.', 'AbortError')),
+        cancel: () => reject(new DOMException(t("Действие отменено."), 'AbortError')),
       };
       setKeyDialog('unlock');
     });
@@ -153,18 +155,18 @@ function App() {
       const url = URL.createObjectURL(new Blob([JSON.stringify(backup)], { type: 'application/json' }));
       const link = document.createElement('a'); link.href = url; link.download = 'quiet-encrypted-backup.json'; link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000); setBackupReady(true);
-    } catch { setError('Не удалось сохранить копию.'); }
+    } catch { setError(t("Не удалось сохранить копию.")); }
   }
   async function importBackup(file?: File) {
     if (!file || !unlocked || noteOperation.current) return;
     try {
-      if (file.size > MAX_ENCRYPTED_BYTES + 100_000) throw new Error('Слишком большой файл.');
+      if (file.size > MAX_TRANSFER_BYTES) throw new Error(t("Слишком большой файл."));
       const backup = backupSchema.parse(JSON.parse(await file.text()));
-      if (backup.accountId !== unlocked.accountId) throw new Error('Эта копия относится к другой доске.');
+      if (backup.accountId !== unlocked.accountId) throw new Error(t("Эта копия относится к другой доске."));
       const restored = await decryptBoard(unlocked.key, unlocked.accountId, backup.revision, backup.envelope);
-      if (!window.confirm('Заменить текущие заметки содержимым зашифрованной копии?')) return;
+      if (!window.confirm(t("Заменить текущие заметки содержимым зашифрованной копии?"))) return;
       change(restored);
-    } catch (err) { setError(err instanceof Error && !(err instanceof z.ZodError) ? err.message : 'Не удалось прочитать зашифрованную копию.'); }
+    } catch (err) { setError(err instanceof Error && !(err instanceof z.ZodError) ? localizeError(err) : t("Не удалось прочитать зашифрованную копию.")); }
     finally { if (fileInput.current) fileInput.current.value = ''; }
   }
   async function reload() {
@@ -177,14 +179,14 @@ function App() {
   return <main>
     {unlocked ? <Workspace account={unlocked} initialBoard={board} logout={() => lock()} migrated={async () => {
       change({ ...emptyBoard(), lockKeys: board.lockKeys });
-      if (!(await sync.current!.flush())) throw new Error('Не удалось завершить перенос старой доски.');
+      if (!(await sync.current!.flush())) throw new Error(t("Не удалось завершить перенос старой доски."));
     }} /> : <div className="login-screen">
       <Button className="primary login-button" onClick={() => void auth()} disabled={busy} aria-busy={busy}>
-        {busy ? <span className="spinner" aria-label="Загрузка доски" role="status" /> : 'Войти с passkey'}
+        {busy ? <span className="spinner" aria-label={t("Загрузка доски")} role="status" /> : t("Войти с passkey")}
       </Button>
       <div className="login-links">
-        {!hasBoard && <Button className="create-key-link" onClick={() => void auth(true)} disabled={busy}>Создать passkey</Button>}
-        <Button className="create-key-link" onClick={() => { setError(''); setKeyDialog('login'); }} disabled={busy}>Войти по ключу</Button>
+        {!hasBoard && <Button className="create-key-link" onClick={() => void auth(true)} disabled={busy}>{t("Создать passkey")}</Button>}
+        <Button className="create-key-link" onClick={() => { setError(''); setKeyDialog('login'); }} disabled={busy}>{t("Войти по ключу")}</Button>
       </div>
       {error && <p className={`login-error ${!hasBoard ? 'with-create-link' : ''}`} role="alert">{error}</p>}
     </div>}
@@ -195,14 +197,29 @@ function App() {
       pendingKey.current?.cancel(); pendingKey.current = null; setKeyDialog(null);
     }} />}
     <input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={e => void importBackup(e.currentTarget.files?.[0])} />
-    {unlocked && error && <div className="error-banner" role="alert"><div><strong>{syncState === 'conflict' ? 'Конфликт версий' : 'Не удалось сохранить'}</strong><p>{error}</p></div><div className="error-actions">{syncState !== 'conflict' && <Button icon="retry" onClick={() => void sync.current?.flush()}>Повторить</Button>}<Button icon="download" onClick={download}>Скачать копию</Button>{syncState === 'conflict' && <Button onClick={() => setReloadDialog(true)}>Загрузить с сервера</Button>}</div></div>}
-    <Modal open={lockDialog || reloadDialog} close={() => { if (!busy) { setLockDialog(false); setReloadDialog(false); } }} label="Сохранить локальную версию"><Icon name="lock" size={28} /><h2>Сначала сохрани свою версию.</h2><p>{lockDialog ? 'На сервер ушли не все изменения. Скачай зашифрованную копию или вернись к доске.' : 'Загрузка с сервера заменит локальные изменения. Сначала можно скачать зашифрованную копию.'}</p><p className="muted">Копия открывается только исходным ключом этой доски.</p><Button className="primary" icon="download" onClick={download}>{backupReady ? 'Скачать копию ещё раз' : 'Скачать копию'}</Button><Button className="secondary" disabled={busy} onClick={() => lockDialog ? void lock(true) : void reload()}>{lockDialog ? 'Выйти без сохранения' : 'Заменить локальную версию'}</Button><Button className="text-button" onClick={() => { setLockDialog(false); setReloadDialog(false); }}>Вернуться к доске</Button></Modal>
+    {unlocked && error && <div className="error-banner" role="alert"><div><strong>{syncState === 'conflict' ? t("Конфликт версий") : t("Не удалось сохранить")}</strong><p>{error}</p></div><div className="error-actions">{syncState !== 'conflict' && <Button icon="retry" onClick={() => void sync.current?.flush()}>{t("Повторить")}</Button>}<Button icon="download" onClick={download}>{t("Скачать копию")}</Button>{syncState === 'conflict' && <Button onClick={() => setReloadDialog(true)}>{t("Загрузить с сервера")}</Button>}</div></div>}
+    <Modal open={lockDialog || reloadDialog} close={() => { if (!busy) { setLockDialog(false); setReloadDialog(false); } }} label={t("Сохранить локальную версию")}><Icon name="lock" size={28} /><h2>{t("Сначала сохрани свою версию.")}</h2><p>{lockDialog ? t("На сервер ушли не все изменения. Скачай зашифрованную копию или вернись к доске.") : t("Загрузка с сервера заменит локальные изменения. Сначала можно скачать зашифрованную копию.")}</p><p className="muted">{t("Копия открывается только исходным ключом этой доски.")}</p><Button className="primary" icon="download" onClick={download}>{backupReady ? t("Скачать копию ещё раз") : t("Скачать копию")}</Button><Button className="secondary" disabled={busy} onClick={() => lockDialog ? void lock(true) : void reload()}>{lockDialog ? t("Выйти без сохранения") : t("Заменить локальную версию")}</Button><Button className="text-button" onClick={() => { setLockDialog(false); setReloadDialog(false); }}>{t("Вернуться к доске")}</Button></Modal>
   </main>;
 }
 function Root() {
   const read = () => new URLSearchParams(location.hash.slice(1)).get('public');
   const [publicToken, setPublicToken] = useState(read);
   useEffect(() => { const changed = () => setPublicToken(read()); window.addEventListener('hashchange', changed); return () => window.removeEventListener('hashchange', changed); }, []);
+  const [configured, setConfigured] = useState(false), [configError, setConfigError] = useState(''), [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setConfigError('');
+    void loadClientConfig().then(() => { if (active) setConfigured(true); }).catch(() => {
+      if (active) setConfigError(t("Не удалось загрузить настройки сервера. Попробуйте снова."));
+    });
+    return () => { active = false; };
+  }, [attempt]);
+  // Neither session restoration nor public-board decoding mounts until live limits are configured.
+  if (!configured) return <main><div className="login-screen">
+    {configError ? <><p className="login-error" role="alert">{configError}</p><Button icon="retry" onClick={() => { setConfigError(''); setAttempt(value => value + 1); }}>{t("Повторить")}</Button></>
+      : <Button disabled aria-busy="true"><span className="spinner" role="status" aria-label={t("Загрузка настроек")} /></Button>}
+  </div></main>;
   return <><Tooltip />{publicToken ? <PublicBoard key={publicToken} token={publicToken} /> : <App />}</>;
 }
+applyDocumentLocale();
 render(<Root />, document.getElementById('app')!);

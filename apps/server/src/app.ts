@@ -5,7 +5,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse, type WebAuthnCredential, type RegistrationResponseJSON, type AuthenticationResponseJSON } from '@simplewebauthn/server';
-import { envelopeSchema, saveSchema, deltaSchema, initialEntitiesSchema, keyAuthSchema, keyRegistrationSchema, MAX_ENCRYPTED_BYTES, SESSION_SECONDS, base64url } from '@quiet/shared';
+import { envelopeSchema, saveSchema, deltaSchema, initialEntitiesSchema, keyAuthSchema, keyRegistrationSchema, MAX_TRANSFER_BYTES, BOARD_STORAGE_LIMIT, SESSION_SECONDS, base64url } from '@quiet/shared';
 import { StorageLimitError, type Store, type Ceremony } from './store.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -47,7 +47,8 @@ export function createApp(store: Store, config: Config) {
     c.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
     await next();
   });
-  app.use('/api/*', bodyLimit({ maxSize: MAX_ENCRYPTED_BYTES + 200_000, onError: c => c.json({ error: 'Слишком большая доска.' }, 413) }));
+  app.use('/api/*', bodyLimit({ maxSize: MAX_TRANSFER_BYTES, onError: c => c.json({ error: 'Слишком большая доска.' }, 413) }));
+  app.get('/api/config', c => { c.header('Cache-Control', 'no-store'); return c.json({ boardLimitBytes: BOARD_STORAGE_LIMIT }); });
   app.use('/api/*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
     if (!['GET', 'HEAD'].includes(c.req.method)) {

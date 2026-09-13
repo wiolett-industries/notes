@@ -1,3 +1,4 @@
+import { t, localizeError } from './locale';
 import { PRF_INPUT, emptyBoard, type Vault, type BoardData, type NoteData, type LockKeys } from '@quiet/shared';
 import { api } from './api';
 import { fromBase64, toBase64, deriveKey } from './crypto';
@@ -15,12 +16,12 @@ type PRFOutputs = AuthenticationExtensionsClientOutputs & { prf?: { enabled?: bo
 type PRFInputs = AuthenticationExtensionsClientInputs & { prf: { eval?: { first: Uint8Array<ArrayBuffer> } } };
 export type PendingRegistration = { options: RequestJSON; accountId: string };
 export type Unlocked = { key: CryptoKey; accountId: string; revision: number; board: BoardData; entityIndex?: EntityIndex | null; authMethod?: 'passkey' | 'key' };
-const PRF_ERROR = 'Этот браузер или passkey не поддерживает шифрование (PRF). Можно создать отдельную доску через «Войти по ключу».';
+const PRF_ERROR = t("Этот браузер или passkey не поддерживает шифрование (PRF). Можно создать отдельную доску через «Войти по ключу».");
 function supported() {
-  if (!window.isSecureContext || !window.PublicKeyCredential || !navigator.credentials || !crypto.subtle) throw new Error('Для passkey нужен поддерживаемый браузер и HTTPS (или localhost).');
+  if (!window.isSecureContext || !window.PublicKeyCredential || !navigator.credentials || !crypto.subtle) throw new Error(t("Для passkey нужен поддерживаемый браузер и HTTPS (или localhost)."));
 }
 function requireCredential(value: Credential | null): PublicKeyCredential {
-  if (!value || value.type !== 'public-key') throw new Error('Passkey не выбран.');
+  if (!value || value.type !== 'public-key') throw new Error(t("Passkey не выбран."));
   return value as PublicKeyCredential;
 }
 // Do not use credential.toJSON(): it can include the PRF secret in clientExtensionResults.
@@ -33,7 +34,7 @@ export function serializeRegistration(credential: PublicKeyCredential) {
 }
 export function serializeAuthentication(credential: PublicKeyCredential) {
   const response = credential.response as AuthenticatorAssertionResponse;
-  if (!response.userHandle) throw new Error('Нужен обнаруживаемый passkey с идентификатором пользователя.');
+  if (!response.userHandle) throw new Error(t("Нужен обнаруживаемый passkey с идентификатором пользователя."));
   return { id: credential.id, rawId: toBase64(credential.rawId), type: 'public-key' as const,
     response: { clientDataJSON: toBase64(response.clientDataJSON), authenticatorData: toBase64(response.authenticatorData), signature: toBase64(response.signature), userHandle: toBase64(response.userHandle) },
     clientExtensionResults: {},
@@ -69,7 +70,7 @@ export async function finishRegistration(pending: PendingRegistration): Promise<
     const initial = (await prepareDelta(key, pending.accountId, 0, board, null))!;
     const snapshot = { format: 2, manifest: initial.patch.manifest, entities: initial.patch.upserts };
     const vault = await api<Vault>('/auth/register/finish', { credential: serializeAuthentication(credential), snapshot });
-    if (vault.accountId !== pending.accountId || vault.revision !== 1) throw new Error('Некорректный ответ при создании доски.');
+    if (vault.accountId !== pending.accountId || vault.revision !== 1) throw new Error(t("Некорректный ответ при создании доски."));
     const decoded = await decodeVault(key, vault);
     return { key, board: decoded.board, entityIndex: decoded.index, accountId: vault.accountId, revision: vault.revision };
   } finally { new Uint8Array(prf).fill(0); }
@@ -103,7 +104,7 @@ export async function prepareNoteLocks(accountId: string): Promise<LockKeys> {
   } finally { new Uint8Array(prf).fill(0); }
 }
 export function authError(error: unknown): string {
-  if (error instanceof DOMException && ['NotAllowedError', 'AbortError'].includes(error.name)) return 'Действие отменено или время ожидания истекло. Можно попробовать ещё раз.';
-  if (error instanceof DOMException && error.name === 'OperationError') return 'Не удалось расшифровать данные. Используйте исходный ключ или passkey этой доски.';
-  return error instanceof Error ? error.message : 'Не удалось открыть доску.';
+  if (error instanceof DOMException && ['NotAllowedError', 'AbortError'].includes(error.name)) return t("Действие отменено или время ожидания истекло. Можно попробовать ещё раз.");
+  if (error instanceof DOMException && error.name === 'OperationError') return t("Не удалось расшифровать данные. Используйте исходный ключ или passkey этой доски.");
+  return error instanceof Error ? localizeError(error) : t("Не удалось открыть доску.");
 }

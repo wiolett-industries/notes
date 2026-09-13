@@ -2,12 +2,13 @@ import { createHash, createPublicKey, randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import {
-  BOARD_STORAGE_LIMIT, BOARD_LIMIT_MESSAGE, MAX_BOARD_BYTES, MAX_ENCRYPTED_BYTES, MAX_ENTITIES, MAX_TRANSFER_BYTES, base64url, deltaSchema,
+  MAX_BOARD_BYTES, MAX_ENCRYPTED_BYTES, MAX_ENTITIES, MAX_TRANSFER_BYTES, base64url, deltaSchema,
   envelopeSchema, initialEntitiesSchema, publicSnapshotSchema,
   type AccountIdentity, type BoardEntry, type BoardRole, type DeltaWrite,
   type EntityWrite, type Envelope, type InitialEntities, type PublicSnapshot, type Vault,
 } from '@quiet/shared';
 import type { imageFiles } from './image-files.js';
+import { storageLimitBytes } from './storage-limit.js';
 
 export class CollaborationError extends Error {
   constructor(public readonly status: number, message: string) { super(message); }
@@ -27,7 +28,8 @@ export type CollaborationChange =
   | { event: 'boards.changed'; boardId: string; uids: string[] };
 
 /** Shares the legacy DB and encrypted file directory; initialize before any file sweep. */
-export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typeof imageFiles>) {
+export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typeof imageFiles>, limitBytes = storageLimitBytes()) {
+  const limitMessage = `Достигнут лимит доски — ${limitBytes / 1_000_000} МБ. Удалите часть данных или отключите публичный снимок.`;
   db.exec(`
     CREATE TABLE IF NOT EXISTS collaboration_identities (
       uid TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
@@ -118,7 +120,7 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
     const membership = db.prepare('SELECT role, wrapped_key FROM collaboration_members WHERE board_id = ? AND uid = ?').get(boardId, uid) as { role: BoardRole; wrapped_key: string } | undefined;
     if (!membership) return fail(403, 'Нет доступа к доске.');
     const row = board(boardId);
-    return { id: row.id, ownerId: row.owner_id, role: membership.role, name: JSON.parse(row.name), wrappedKey: membership.wrapped_key, publicToken: membership.role === 'owner' ? row.public_token : null, usedBytes: usage(boardId) };
+    return { id: row.id, ownerId: row.owner_id, role: membership.role, name: JSON.parse(row.name), wrappedKey: membership.wrapped_key, publicToken: membership.role === 'owner' ? row.public_token : null, usedBytes: usage(boardId), limitBytes };
   }
   function usage(boardId: string) {
     const row = board(boardId);
@@ -126,7 +128,7 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
     const snapshot = row.public_snapshot ? (publicFilePattern.test(row.public_snapshot) ? files.snapshotBytes(row.public_snapshot) : Buffer.byteLength(row.public_snapshot)) : 0;
     return entities.bytes + Buffer.byteLength(row.name) + Buffer.byteLength(row.manifest) + snapshot;
   }
-  function checkQuota(boardId: string) { if (usage(boardId) > BOARD_STORAGE_LIMIT) fail(413, BOARD_LIMIT_MESSAGE); }
+  function checkQuota(boardId: string) { if (usage(boardId) > limitBytes) fail(413, limitMessage); }
   function identity(uid: string): AccountIdentity | null {
     const row = db.prepare('SELECT public_key, private_key, (initialized != 0 OR EXISTS (SELECT 1 FROM collaboration_boards WHERE owner_id = collaboration_identities.uid)) AS initialized FROM collaboration_identities WHERE uid = ?').get(uid) as { public_key: string; private_key: string; initialized: number } | undefined;
     return row ? { publicKey: row.public_key, privateKey: JSON.parse(row.private_key), initialized: Boolean(row.initialized) } : null;
@@ -378,7 +380,7 @@ export function createCollaborationStore(db: DatabaseSync, files: ReturnType<typ
         owner(uid, boardId);
         const previous = board(boardId);
         const previousBytes = previous.public_snapshot ? (publicFilePattern.test(previous.public_snapshot) ? files.snapshotBytes(previous.public_snapshot) : Buffer.byteLength(previous.public_snapshot)) : 0;
-        if (snapshot !== null && usage(boardId) - previousBytes + Buffer.byteLength(serialized!) > BOARD_STORAGE_LIMIT) fail(413, BOARD_LIMIT_MESSAGE);
+        if (snapshot !== null && usage(boardId) - previousBytes + Buffer.byteLength(serialized!) > limitBytes) fail(413, limitMessage);
         const token = snapshot === null ? null : previous.public_token ?? randomBytes(32).toString('base64url');
         const reference = snapshot === null ? null : files.writeSnapshot(snapshot);
         if (reference) snapshots.created.push(reference);

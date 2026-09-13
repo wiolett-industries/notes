@@ -1,3 +1,4 @@
+import { t, quotaMessage } from './locale';
 import { boardSchema, envelopeSchema, MAX_BOARD_BYTES, type BoardData, type Envelope } from '@quiet/shared';
 
 const encoder = new TextEncoder();
@@ -12,7 +13,7 @@ export function fromBase64(value: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(binary, char => char.charCodeAt(0));
 }
 export async function deriveKey(prf: ArrayBuffer, accountId: string, domain = 'quiet/board/aes-256-gcm/v1'): Promise<CryptoKey> {
-  if (prf.byteLength !== 32) throw new Error('Passkey не вернул ключ шифрования.');
+  if (prf.byteLength !== 32) throw new Error(t("Passkey не вернул ключ шифрования."));
   const material = await crypto.subtle.importKey('raw', prf, 'HKDF', false, ['deriveKey']);
   return crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: encoder.encode(accountId), info: encoder.encode(domain) }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
@@ -21,7 +22,7 @@ function aad(accountId: string, revision: number) {
 }
 export async function encryptBoard(key: CryptoKey, accountId: string, revision: number, board: BoardData): Promise<Envelope> {
   const plaintext = encoder.encode(JSON.stringify(boardSchema.parse(board)));
-  if (plaintext.byteLength > MAX_BOARD_BYTES) { plaintext.fill(0); throw new Error('Доска превышает 300 МБ. Удалите часть изображений.'); }
+  if (plaintext.byteLength > MAX_BOARD_BYTES) { plaintext.fill(0); throw new Error(quotaMessage(MAX_BOARD_BYTES)); }
   const iv = crypto.getRandomValues(new Uint8Array(12));
   try {
     const result = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(accountId, revision), tagLength: 128 }, key, plaintext);

@@ -1,3 +1,4 @@
+import { t } from './locale';
 import MarkdownIt from 'markdown-it';
 import type { NoteData, ConnectionData } from '@quiet/shared';
 
@@ -17,9 +18,51 @@ md.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
 md.renderer.rules.note_mention = (tokens, index, _options, env) => {
   const token = tokens[index], id = token.meta!.id as string;
   const note = (env?.notes as Map<string, Pick<NoteData, 'title'>> | undefined)?.get(id);
-  const label = md.utils.escapeHtml(note?.title || token.content || 'Заметка');
-  return note ? `<a class="note-mention" href="#note-${id}" data-note-ref="${id}">@${label}</a>` : `<span class="note-mention missing" title="Заметка удалена">@${label}</span>`;
+  const label = md.utils.escapeHtml(note?.title || token.content || t("Заметка"));
+  return note ? `<a class="note-mention" href="#note-${id}" data-note-ref="${id}">@${label}</a>` : `<span class="note-mention missing" title="${md.utils.escapeHtml(t('Заметка удалена'))}">@${label}</span>`;
 };
+type Task = { line: number; offset: number; checked: boolean; inline: Token; item: Token; prefixLength: number };
+function tasks(text: string, tokens: Token[]): Task[] {
+  // Token maps count source lines after newline normalization. Keep original byte-for-byte
+  // line endings and indentation so toggling changes only the character inside brackets.
+  const lines = [...text.matchAll(/[^\r\n]*(?:\r\n|\r|\n|$)/g)];
+  const result: Task[] = [];
+  for (let index = 2; index < tokens.length; index++) {
+    const inline = tokens[index], paragraph = tokens[index - 1], item = tokens[index - 2];
+    if (inline.type !== 'inline' || paragraph.type !== 'paragraph_open' || item.type !== 'list_item_open' || !inline.map) continue;
+    const marker = /^\[([ xX])\](?:[ \t]+|$)/.exec(inline.content);
+    if (!marker) continue;
+    const line = inline.map[0], source = lines[line];
+    if (!source) continue;
+    // A parsed list item can have nested list/quote prefixes on the same physical line.
+    const prefix = /^[ \t>]*(?:(?:[-+*]|\d+[.)])[ \t]+[ \t>]*)*\[([ xX])\](?=[ \t\r\n]|$)/.exec(source[0]);
+    if (!prefix || prefix[1] !== marker[1]) continue;
+    result.push({ line, offset: source.index! + prefix[0].lastIndexOf('[') + 1, checked: marker[1] !== ' ', inline, item, prefixLength: marker[0].length });
+  }
+  return result;
+}
+md.renderer.rules.task_checkbox = (tokens, index) => {
+  const { line, checked, editable, label } = tokens[index].meta! as { line: number; checked: boolean; editable: boolean; label: string };
+  return `<input class="task-checkbox" type="checkbox" data-task-line="${line}" aria-label="${md.utils.escapeHtml(label)}"${checked ? ' checked' : ''}${editable ? '' : ' disabled'}> `;
+};
+function decorateTasks(text: string, tokens: Token[], env: Record<string, unknown>, editable: boolean) {
+  for (const task of tasks(text, tokens)) {
+    task.item.attrJoin('class', 'task-list-item');
+    const content = task.inline.content.slice(task.prefixLength);
+    const children = md.parseInline(content, env)[0].children ?? [];
+    const checkbox = md.parseInline('checkbox', env)[0].children![0];
+    checkbox.type = 'task_checkbox';
+    checkbox.meta = { line: task.line, checked: task.checked, editable, label: content.split('\n')[0] || t("Заметка") };
+    task.inline.children = [checkbox, ...children];
+  }
+}
+/** Re-parse before applying a source-line toggle: code fences and ordinary text are never tasks. */
+export function toggleMarkdownTask(text: string, line: number, checked: boolean): string {
+  if (!Number.isSafeInteger(line) || line < 0) return text;
+  const task = tasks(text, md.parse(text, {})).find(task => task.line === line);
+  if (!task || task.checked === checked) return text;
+  return text.slice(0, task.offset) + (checked ? 'x' : ' ') + text.slice(task.offset + 1);
+}
 function collect(tokens: Token[]): string[] {
   const ids = new Set<string>();
   for (const token of tokens) {
@@ -46,13 +89,15 @@ function decorateMentions(tokens: Token[]) {
     } else if (token.children && token.type !== 'image') decorateMentions(token.children);
   }
 }
-export function renderMarkdown(text: string, notes: Pick<NoteData, 'id' | 'title'>[]) {
-  const tokens = md.parse(text, {});
+export function renderMarkdown(text: string, notes: Pick<NoteData, 'id' | 'title'>[], editableTasks = false) {
+  const env = { notes: new Map(notes.map(note => [note.id, note])) };
+  const tokens = md.parse(text, env);
+  decorateTasks(text, tokens, env, editableTasks);
   decorateMentions(tokens);
-  return md.renderer.render(tokens, md.options, { notes: new Map(notes.map(note => [note.id, note])) });
+  return md.renderer.render(tokens, md.options, env);
 }
 export function mentionText(note: Pick<NoteData, 'id' | 'title'>) {
-  const title = (note.title || 'Заметка').replace(/([\\`*_[\]<>])/g, '\\$1').replace(/[\r\n]/g, ' ');
+  const title = (note.title || t("Заметка")).replace(/([\\`*_[\]<>])/g, '\\$1').replace(/[\r\n]/g, ' ');
   return `[@${title}](note:${note.id})`;
 }
 export type MentionConnection = ConnectionData & { mention?: boolean };

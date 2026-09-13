@@ -1,1 +1,1 @@
-{"name":"@quiet/web","private":true,"type":"module","scripts":{"dev":"vite --host localhost","build":"vite build"},"dependencies":{"@quiet/shared":"*","lucide-preact":"^1.45.0","markdown-it":"^15.0.2","preact":"^10.29.8"}}
+{"name":"@quiet/web","private":true,"type":"module","scripts":{"dev":"vite --host localhost","build":"vite build"},"dependencies":{"@quiet/shared":"*","lucide-preact":"^1.45.0","markdown-it":"^15.0.2","preact":"^10.29.8"},"license":"MIT"}

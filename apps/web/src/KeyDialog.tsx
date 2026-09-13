@@ -1,3 +1,4 @@
+import { t } from './locale';
 import { useRef, useState } from 'preact/hooks';
 import { Button } from './ui';
 import { authError } from './passkey';
@@ -27,18 +28,18 @@ export function KeyDialog({ unlock = false, submit, close }: {
   }
   async function copy() {
     try { await navigator.clipboard.writeText(value); setCopied(true); }
-    catch { setError('Не удалось скопировать. Выделите ключ и сохраните вручную.'); }
+    catch { setError(t("Не удалось скопировать. Выделите ключ и сохраните вручную.")); }
   }
-  return <Modal open={visible} close={() => { if (!working.current) setVisible(false); }} closed={close} label={unlock ? 'Разблокировать заметку' : creating ? 'Новый ключ' : 'Войти по ключу'}>
+  return <Modal open={visible} close={() => { if (!working.current) setVisible(false); }} closed={close} label={unlock ? t("Разблокировать заметку") : creating ? t("Новый ключ") : t("Войти по ключу")}>
     <form onSubmit={e => { e.preventDefault(); void send(); }}>
-      {creating && <p>Сохраните ключ: без него восстановить доступ к доске нельзя.</p>}
-      {creating ? <textarea className="access-key-input" aria-label="Новый ключ доступа" value={value} readOnly spellcheck={false} rows={3} onFocus={e => e.currentTarget.select()} /> : <input className="access-key-input" aria-label="Ключ доступа" type="password" value={value} onInput={e => setValue(e.currentTarget.value)} placeholder="notes_…" autoComplete="off" autoCapitalize="off" spellcheck={false} autoFocus disabled={busy} />}
-      {creating && <Button onClick={() => void copy()} disabled={busy}>{copied ? 'Скопировано' : 'Скопировать ключ'}</Button>}
+      {creating && <p>{t("Сохраните ключ: без него восстановить доступ к доске нельзя.")}</p>}
+      {creating ? <textarea className="access-key-input" aria-label={t("Новый ключ доступа")} value={value} readOnly spellcheck={false} rows={3} onFocus={e => e.currentTarget.select()} /> : <input className="access-key-input" aria-label={t("Ключ доступа")} type="password" value={value} onInput={e => setValue(e.currentTarget.value)} placeholder="notes_…" autoComplete="off" autoCapitalize="off" spellcheck={false} autoFocus disabled={busy} />}
+      {creating && <Button onClick={() => void copy()} disabled={busy}>{copied ? t("Скопировано") : t("Скопировать ключ")}</Button>}
       {error && <p className="key-error" role="alert">{error}</p>}
       <Button type="submit" className="primary" disabled={busy || !value.trim()} aria-busy={busy}>
-        {busy ? <span className="spinner" aria-label="Загрузка" role="status" /> : unlock ? 'Разблокировать' : creating ? 'Ключ сохранён — открыть доску' : 'Войти'}
+        {busy ? <span className="spinner" aria-label={t("Загрузка")} role="status" /> : unlock ? t("Разблокировать") : creating ? t("Ключ сохранён — открыть доску") : t("Войти")}
       </Button>
-      {!unlock && !creating && <Button className="text-button" onClick={generate} disabled={busy}>Создать новый ключ</Button>}
+      {!unlock && !creating && <Button className="text-button" onClick={generate} disabled={busy}>{t("Создать новый ключ")}</Button>}
     </form>
   </Modal>;
 }

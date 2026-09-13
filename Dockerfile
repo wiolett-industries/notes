@@ -15,6 +15,7 @@ FROM node:24-bookworm-slim AS runtime
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3001 DATABASE_PATH=/data/notes.sqlite IMAGES_PATH=/images
 WORKDIR /app
 COPY --from=build /app/package.json ./
+COPY LICENSE ./LICENSE
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/apps/server/package.json ./apps/server/package.json
 COPY --from=build /app/apps/server/dist ./apps/server/dist

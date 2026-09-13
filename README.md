@@ -1,66 +1,160 @@
-# notes
+<div align="center">
 
-Персональная зашифрованная доска: заметки, картинки, Markdown, группы и связи. Вход через passkey с PRF или сгенерированный в браузере ключ доступа. Данные шифруются в браузере; сервер хранит зашифрованные изменения отдельных объектов.
+# Notes
 
-## Ключ доступа и сессия
+**An encrypted canvas for connected ideas.**
 
-На экране входа выберите «Войти по ключу», затем вставьте сохранённый ключ либо создайте новый. Ключ `notes_…` содержит 256 случайных бит и показывается до создания доски. Сохраните его в менеджере паролей: восстановления утраченного ключа нет. Новый ключ создаёт отдельную доску, а не открывает существующую доску с passkey.
+Notes, images, Markdown, and a little room to think.\
+Self-hostable. No email or password required.
 
-HKDF разделяет идентификатор аккаунта, токен входа, ключ шифрования доски и ключ защиты заблокированных заметок. Исходный ключ не отправляется на сервер; сервер хранит SHA-256 отдельного токена входа. HTTPS обязателен, кроме локальной разработки.
+[**Open Notes →**](https://notes.wlt.sh) · [Self-host](#self-hosting) · [Encryption](docs/encryption.md) · [Contributing](CONTRIBUTING.md)
 
-Перезагрузка вкладки сохраняет вход обоими способами. Действия мышью, касания, прокрутка и клавиатура в видимой вкладке продлевают серверную сессию и срок сохранённого ключа ещё на 12 часов; запрос отправляется не чаще раза в минуту. Фоновая или неактивная вкладка сама сессию не продлевает. Истёкшая сессия требует повторного входа. В IndexedDB хранится неэкспортируемый CryptoKey доски, связанный с меткой вкладки в sessionStorage. Исходный ключ, PRF и открытые заметки туда не записываются. «Выйти» удаляет сохранённый доступ. Для разблокировки заметки нужно снова подтвердить passkey или ввести исходный ключ. При запрете хранилища браузером автоматическое восстановление входа недоступно.
+[![License: MIT](https://img.shields.io/badge/License-MIT-b7cba1?style=flat-square&labelColor=252826)](LICENSE)
+[![Node.js 24.13+](https://img.shields.io/badge/Node.js-24.13%2B-b7cba1?style=flat-square&labelColor=252826)](https://nodejs.org/)
 
-## Локально
+</div>
 
-Node.js 24.13+.
+![Notes in dark mode: a project board with Markdown notes, an image, two groups, and labeled connections](docs/assets/board.webp)
+
+<sub>A real 1920 × 1080 app screenshot with fictional content. [Reproduce this demo](docs/demo.md).</sub>
+
+## A board that stays out of the way
+
+- **Think spatially.** An infinite dotted canvas with grid snapping, resizable notes, groups, and labeled solid or dashed connections.
+- **Write and connect.** Markdown with clickable task lists, formatting shortcuts, board search, and `@` mentions that create connections automatically.
+- **Keep visual references.** Drop in images, move them like notes, and download the stored version from their header.
+- **Work together.** Invite people by UID as editors or viewers. See their cursors, selections, and movements in real time.
+- **Control access.** Passkey or generated access-key sign-in, encrypted private boards, pinned notes, and separately locked note contents.
+- **Share deliberately.** Publish a read-only, unencrypted snapshot without giving visitors access to your private board.
+- **Feel at home.** Automatic light/dark themes and English/Russian UI selected from browser language preferences. Each board remembers your camera position locally.
+
+Each account can own **3 boards**. Each board supports **10 participants**, including its owner. The storage quota defaults to **200 MB per board**, configurable with `BOARD_LIMIT_MB`.
+
+## Sign in
+
+Open [notes.wlt.sh](https://notes.wlt.sh), or your own instance, and choose:
+
+| Method | How it works |
+| --- | --- |
+| **Passkey** | Uses WebAuthn for authentication and the PRF extension to derive encryption keys in your browser. Requires a compatible browser, authenticator, and passkey provider. |
+| **Access key** | Generates a random 256-bit key in your browser. Save it in a password manager and use it to sign in on another supported device. Useful when WebAuthn PRF is unavailable. |
+
+These methods create separate accounts; they are not interchangeable recovery methods. There is no email-based account recovery. **Keep your original passkey or access key.** Reloading a tab preserves an active session when browser storage is available; visible user activity extends it for another 12 hours.
+
+## Self-hosting
+
+Notes runs as **one Node.js process** serving the frontend, API, and WebSocket endpoint. No separate database service, Redis, or object-storage service is required.
+
+```sh
+git clone https://gitlab.wiolett.net/wiolett/notes.git
+cd notes
+docker build -t notes .
+
+docker run -d --name notes --restart unless-stopped \
+  -p 127.0.0.1:3001:3001 \
+  -e ORIGIN=https://notes.example.com \
+  -e RP_ID=notes.example.com \
+  -e DATABASE_PATH=/data/notes.sqlite \
+  -e IMAGES_PATH=/data/images \
+  -e BOARD_LIMIT_MB=200 \
+  -v notes-data:/data \
+  notes
+```
+
+Put an HTTPS reverse proxy in front of port 3001 and forward WebSocket upgrades for `/socket`. Use your actual public domain for both `ORIGIN` and `RP_ID`. Passkeys are tied to that domain; changing it does not migrate existing passkeys.
+
+### Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ORIGIN` | `http://localhost:5173` in development; required in production | Exact browser origin, including scheme and any port, without a trailing slash. |
+| `RP_ID` | `localhost` in development; required in production | Passkey relying-party ID. Must equal the hostname in `ORIGIN`. |
+| `HOST` | `127.0.0.1`; `0.0.0.0` in Docker | Bind address. |
+| `PORT` | `3001` | Frontend, API, and WebSocket port. |
+| `DATABASE_PATH` | `data/quiet.sqlite` locally; `/data/notes.sqlite` in Docker | SQLite database file. |
+| `IMAGES_PATH` | `data/images` locally; `/images` in Docker | Encrypted image files and explicitly published snapshots. The example above stores both under the single `/data` volume. |
+| `BOARD_LIMIT_MB` | `200` | Per-board storage quota in decimal MB: 1 MB = 1,000,000 bytes. |
+| `NODE_ENV` | Unset locally; `production` in Docker | Production requires HTTPS and explicit origin/RP configuration. |
+
+Storage accounting uses **the stored encrypted bytes**, not the original upload size. A 10 KB image that becomes a 20 KB `.enc` file consumes 20 KB, plus its board metadata. Public snapshots also count. Transport allowances are derived from the configured quota; there is no separate fixed 300 MB board limit. Changing the environment requires restarting the server and reloading open clients to fetch its configuration.
+
+The container runs as UID/GID **1000:1000**. Mounted directories must be writable by that user. Health check: `GET /api/health`.
+
+### Backups and updates
+
+Back up **both SQLite and the image directory together**. Stop the container before copying the volume to keep database references and files consistent; retain the SQLite WAL files if present. Keep the volume when replacing the container.
+
+The toolbar's encrypted export is a per-board backup, not an account recovery method. It requires the original board's key. Restoring a backup replaces that board's content after confirmation.
+
+## How privacy works
+
+Private board data is encrypted in the browser. Each board has its own random AES-256 key; notes, positions, groups, and connections are encrypted separately so updates send only changed entities. Image ciphertext is stored as files rather than SQLite blobs.
+
+Inviting someone wraps the board key with that person's RSA-OAEP public key. The server enforces editor/viewer permissions and relays encrypted collaboration messages. Locked note contents use a separate key hierarchy; titles remain visible to board members.
+
+**Publishing is an explicit privacy boundary.** A public link serves a plaintext snapshot stored on the server. It does not reveal the live private board, and later edits do not update the snapshot. Disable publishing to remove it from the server; copies already downloaded by visitors cannot be recalled.
+
+Encryption does not hide membership, roles, object sizes, identifiers, revisions, or activity from the server. It also does not protect an unlocked browser from malicious extensions or a compromised application host. Removing a participant blocks future server access but does not rotate the board key or erase data they already received.
+
+Read the [encryption design, key hierarchy, and limitations](docs/encryption.md). Notes has **not undergone an independent security audit**. For vulnerability reports, see [SECURITY.md](SECURITY.md).
+
+## Keyboard shortcuts
+
+Shortcuts apply while the canvas is focused. Text editing keeps its normal keyboard behavior.
+
+| Action | Shortcut |
+| --- | --- |
+| Select / pan / connect | `V` / `H` / `C` |
+| Cycle tools | `Ctrl` / `Cmd` + `Space` |
+| New note / group selection | `N` / `G` |
+| Select an area | `Shift` + drag |
+| Select all / clear selection | `Ctrl` / `Cmd` + `A` / `D` |
+| Copy / cut / paste notes | `Ctrl` / `Cmd` + `C` / `X` / `V` |
+| Delete selection | `Backspace` or `Delete` |
+| Search / fit board | `Ctrl` / `Cmd` + `F` / `0` |
+| Bold / italic / link / inline code | `Ctrl` / `Cmd` + `B` / `I` / `K` / `E` |
+| Strikethrough | `Ctrl` / `Cmd` + `Shift` + `X` |
+
+## Development
+
+Requires **Node.js 24.13+** and npm.
 
 ```sh
 npm ci
 npm run dev
 ```
 
-Фронт: `http://localhost:5173`, API: `http://localhost:3001`.
+Open `http://localhost:5173`. Vite proxies `/api` and `/socket` to port 3001. Copy `.env.example` to `.env` if you need to override the defaults.
 
-Чтобы проверить собранное приложение с одного порта:
+To run the built application on one port:
 
 ```sh
 npm run build
 ORIGIN=http://localhost:3001 RP_ID=localhost npm start
 ```
 
-## Docker
-
-```sh
-docker build -t notes .
-docker run -d --name notes --restart unless-stopped \
-  -p 127.0.0.1:3001:3001 \
-  -e ORIGIN=https://notes.example.com \
-  -e RP_ID=notes.example.com \
-  -v notes-data:/data \
-  -e IMAGES_PATH=/data/images \
-  notes
+```text
+apps/web        Preact, Vite, Lucide, Markdown-it, Web Crypto
+apps/server     Hono, Node.js SQLite, WebAuthn, WebSockets
+packages/shared Shared schemas, limits, and chunked transport
 ```
 
-Замените пример домена своим. Перед контейнером нужен HTTPS reverse proxy на порт 3001. `ORIGIN` — точный внешний origin без завершающего `/`, `RP_ID` — его hostname. Фронт и `/api/*` обслуживает один Node.js процесс. Домен привязан к passkey: при его смене существующие ключи для старого домена не подойдут.
+```sh
+npm run typecheck
+npm test
+npm run build
+```
 
-Контейнер запускается от пользователя `node`. SQLite сохраняется в томе `notes-data` по пути `/data/notes.sqlite`; не удаляйте том при обновлении контейнера. Для резервного копирования SQLite используйте согласованный snapshot/SQLite backup, учитывая WAL, либо остановите контейнер перед копированием каталога `/data`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and [the demo guide](docs/demo.md) to reproduce the screenshot.
 
-Изображения шифруются в браузере как отдельные объекты и хранятся файлами `.enc`. В SQLite сохраняются только ссылки и размеры этих объектов. Каталог задаётся через `IMAGES_PATH` (по умолчанию в контейнере `/images`, в примере выше `/data/images`, локально `data/images`). Он не раздаётся как статика. При удалении или замене изображения его старый файл удаляется после сохранения изменений. Для резервной копии нужны база и каталог файлов; остановите контейнер перед их совместным копированием. Том должен быть доступен на запись UID/GID `1000:1000`.
+### Current boundaries
 
-Переменные: `ORIGIN`, `RP_ID`, `HOST` (в контейнере `0.0.0.0`), `PORT` (3001), `DATABASE_PATH`, `IMAGES_PATH` и `NODE_ENV` (в контейнере `production`). Проверка доступности: `GET /api/health`.
+- Up to 10,000 notes, 5,000 groups, and 40,000 connections per board. The interactive group-creation tool currently caps creation at 500 groups.
+- Uploads are re-encoded in the browser to at most 1600 pixels on their longest side, usually as WebP. Download retrieves that stored version, not the untouched original.
+- Transfers are chunked and rendering is culled to the viewport, but complete snapshots are still assembled in memory. Raising the storage quota also raises memory requirements.
+- Concurrent changes merge different objects and fields; conflicting edits to the same field use the last accepted update. This is not character-level collaborative text editing.
+- Real-time presence runs in one server process. Multi-instance deployments need additional coordination and are not supported out of the box.
 
-## Несколько досок и совместная работа
+## License
 
-Пользователь может создать до трёх собственных досок; приглашённые доски отображаются отдельно и не расходуют лимит. Названия зашифрованы. В меню пользователя доступен UID для приглашений.
-
-У каждой доски независимый случайный AES-ключ. При приглашении браузер владельца шифрует его RSA-OAEP ключом получателя; закрытый ключ получателя хранится зашифрованным ключом его аккаунта. Пользователь должен хотя бы раз войти в актуальную версию, чтобы зарегистрировать публичный ключ. Старую персональную доску клиент переносит в первую собственную доску после расшифровки.
-
-Владелец управляет доступом, фиксацией, блокировкой и публикацией. Редактор меняет незакреплённые и незаблокированные заметки; заблокированные незакреплённые блоки можно перемещать, но нельзя читать их содержимое. Viewer только смотрит. Сервер проверяет роли и минимальные открытые метаданные защиты сущностей. Курсоры, чужое выделение и перетаскивания передаются зашифрованными событиями. Камера у каждого своя. Собственные курсоры скрыты; счётчик учитывает уникальные UID.
-
-Публичная ссылка открывает **незашифрованный снимок**, который владелец явно отправляет при публикации. Приватная доска остаётся зашифрованной и продолжает редактироваться независимо. Снимок хранится отдельным `.public.json` файлом в `IMAGES_PATH`; закрытые ключи и содержимое заблокированных заметок исключаются. Отключение публикации удаляет файл и делает ссылку недоступной. Уже скачанную посетителем копию отозвать невозможно. Анонимные посетители не входят в presence и счётчик.
-
-## WebSocket и размеры
-
-Reverse proxy должен пропускать WebSocket Upgrade по `/socket` на тот же Node.js процесс. Список досок, доступ, изменения и presence работают через этот сокет; аутентификация и продление сессии используют HTTPS. Входящие и исходящие снимки разбиваются на чанки по 64 Ki символов с проверкой последовательности, размера и таймаута. Очереди ограничены; медленный клиент переподключается и получает актуальный снимок. Изменения передаются дельтами, неизменённые изображения повторно не шифруются и не отправляются. Объекты вне экрана не монтируются, геометрия связей фильтруется по viewport.
-
-Лимиты: 10 участников вместе с владельцем, 10 000 заметок, 5 000 групп, 40 000 связей и 300 000 000 байт сохранённых данных на доску. Квота включает зашифрованные сущности (в том числе файлы изображений), их метаданные, название, манифест и публичный снимок. Размер SQLite/WAL и история служебных квитанций в пользовательскую квоту не входят. Проверка выполняется внутри транзакции; превышение откатывает изменения и удаляет новые файлы. Полоска в списке досок показывает серверный размер. Снимок всё ещё собирается в памяти браузера; передача разбита на чанки, но потребление памяти ограничивается размером доски, а не одного чанка. При одновременных изменениях объединяются разные поля и объекты; конфликт одного поля решается последней принятой записью. Один экземпляр Node.js обслуживает live-присутствие; несколько процессов без общего брокера не поддерживаются.
+[MIT](LICENSE) — © 2026 Wiolett and contributors. Third-party dependencies retain their own licenses.

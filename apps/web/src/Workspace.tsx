@@ -1,5 +1,8 @@
+import { applyBoardListLimits } from './client-config';
+import { readCamera, rememberCamera, flushCameras } from './camera-memory';
+import { t, countLabel, isStorageLimit, quotaMessage, storageUsage } from './locale';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { BOARD_STORAGE_LIMIT, BOARD_LIMIT_MESSAGE, emptyBoard, type BoardData, type BoardEntry, type EntityVault, type NoteData } from '@quiet/shared';
+import { BOARD_STORAGE_LIMIT, MAX_TRANSFER_BYTES, emptyBoard, type BoardData, type BoardEntry, type EntityVault, type NoteData } from '@quiet/shared';
 import { Board } from './Board';
 import { Button, Icon } from './ui';
 import { BoardSocket } from './socket';
@@ -15,7 +18,7 @@ import { Modal } from './Modal';
 import { RoleDropdown } from './RoleDropdown';
 import { participantColor } from './participant-color';
 
-type NamedBoard = BoardEntry & { title: string; key: CryptoKey };
+type NamedBoard = BoardEntry & { title: string; key: CryptoKey; limitBytes?: number };
 type Peer = { id: string; uid: string; role: string; color?: number; x: number; y: number; selection?: string[] };
 type DragPosition = { id: string; x: number; y: number; width: number; height: number };
 export function Workspace({ account, initialBoard, migrated, logout }: { account: Unlocked; initialBoard: BoardData; migrated: () => Promise<void>; logout: () => Promise<void> }) {
@@ -30,10 +33,10 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
   const [profile, setProfile] = useState(false), [copiedUid, setCopiedUid] = useState(false);
   const [deleting, setDeleting] = useState<NamedBoard | null>(null);
   const [limitReached, setLimitReached] = useState(false);
-  function reportError(message: string) { if (message.includes('300 МБ')) { setLimitReached(true); setError(''); } else setError(message); }
+  function reportError(message: string) { if (isStorageLimit(message)) { setLimitReached(true); setError(''); } else setError(message); }
   function usageBar(entry: NamedBoard) {
-    const bytes = entry.usedBytes ?? 0;
-    return <span className="board-storage" role="progressbar" aria-label="Занято на доске" aria-valuemin={0} aria-valuemax={300} aria-valuenow={Math.round(bytes / 1e6)} data-tooltip={`${(bytes / 1e6).toFixed(1)} / 300 МБ`}><span style={{ width: `${Math.min(100, bytes / BOARD_STORAGE_LIMIT * 100)}%` }} /></span>;
+    const bytes = entry.usedBytes ?? 0, limit = entry.limitBytes ?? BOARD_STORAGE_LIMIT;
+    return <span className="board-storage" role="progressbar" aria-label={t("Занято на доске")} aria-valuemin={0} aria-valuemax={limit / 1e6} aria-valuenow={Math.round(bytes / 1e6)} data-tooltip={storageUsage(bytes, limit)}><span style={{ width: `${Math.min(100, bytes / limit * 100)}%` }} /></span>;
   }
   const [name, setName] = useState('');
   const renameTimer = useRef<ReturnType<typeof setTimeout>>();
@@ -61,11 +64,12 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
   const own = entries.filter(item => item.ownerId === account.accountId), invited = entries.filter(item => item.ownerId !== account.accountId);
   async function list() {
     const list = await socket.current!.request<BoardEntry[]>('boards.list');
+    applyBoardListLimits(list);
     const named: NamedBoard[] = [];
     for (const entry of list) {
       const key = await boardKey(entry, account.accountId, identity.current!);
       const title = await decryptValue<string>(key, entry.id, 'name', entry.name);
-      if (typeof title !== 'string' || title.length > 120) throw new Error('Некорректное название доски.');
+      if (typeof title !== 'string' || title.length > 120) throw new Error(t("Некорректное название доски."));
       named.push({ ...entry, key, title });
     }
     if (alive.current) {
@@ -80,7 +84,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     selfId.current = result.selfId;
   }
   async function select(entry: NamedBoard) {
-    if (manager.current && !(await manager.current.flush())) throw new Error('Сначала сохраните текущие изменения.');
+    if (manager.current && !(await manager.current.flush())) throw new Error(t("Сначала сохраните текущие изменения."));
     const version = ++generation.current;
     switching.current = { boardId: entry.id, patches: [] };
     const opened = await socket.current!.request<{ vault: EntityVault; selfId: string; peers: Peer[] }>('boards.open', { boardId: entry.id });
@@ -90,12 +94,14 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     manager.current?.dispose(); current.current = entry; setSelected(entry); setBoard(decoded.board); setPeers([]); remoteDrags.current.clear(); cancelAnimationFrame(dragAnimation.current); dragAnimation.current = 0; smoothDrags.current = {}; dragTargets.current = {}; setDragPreviews({});
     try { sessionStorage.setItem(`notes:active-board:${account.accountId}`, entry.id); } catch { /* optional preference */ }
     manager.current = new SharedSync(socket.current!, entry.key, vault, decoded.board, decoded.index!, entry.role, value => { if (generation.current === version && alive.current) setBoard(value); }, message => { if (generation.current === version && alive.current) reportError(message); });
+    manager.current.update({ ...decoded.board, camera: readCamera(account.accountId, entry.id, decoded.board.camera) });
+    setBoard(manager.current.board);
     selfId.current = opened.selfId; setPeople(new Set(opened.peers.map(peer => peer.uid)).size);
     for (const patch of switching.current?.patches ?? []) manager.current.receive(patch);
     switching.current = null; setMenu(false); setSharing(false);
   }
   async function create(title: string, source?: BoardData) {
-    if (manager.current && !(await manager.current.flush())) throw new Error('Сначала сохраните изменения.');
+    if (manager.current && !(await manager.current.flush())) throw new Error(t("Сначала сохраните изменения."));
     const id = source ? await entityId(account.accountId, 'first-board') : toBase64(crypto.getRandomValues(new Uint8Array(32)));
     const bytes = crypto.getRandomValues(new Uint8Array(32));
     try {
@@ -144,7 +150,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     alive.current = true; const ws = new BoardSocket(); socket.current = ws;
     const off = [
       ws.on('board.patch', data => { const target = switching.current; if (target && target.boardId === data.boardId) target.patches.push(data); if (Number.isFinite(data.usedBytes)) setEntries(entries => entries.map(entry => entry.id === data.boardId ? { ...entry, usedBytes: data.usedBytes } : entry)); }),
-      ws.on('connected', () => { if (renames.current.size) void flushNames(); }),
+      ws.on('connected', () => { if (identity.current) void list().then(() => { if (renames.current.size) return flushNames(); }).catch(err => setError(authError(err))); }),
       ws.on('boards.changed', () => { if (identity.current) void list().catch(err => setError(authError(err))); }),
       ws.on('board.access', async data => {
         if (!identity.current) return;
@@ -152,7 +158,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
           const all = await list(), active = current.current;
           if (!active || active.id !== data.boardId) return;
           const entry = all.find(item => item.id === active.id);
-          if (!entry) { manager.current?.dispose(); manager.current = null; current.current = null; setSelected(null); setBoard(emptyBoard()); setPeers([]); setMenu(true); setError('Доступ к доске отозван.'); return; }
+          if (!entry) { manager.current?.dispose(); manager.current = null; current.current = null; setSelected(null); setBoard(emptyBoard()); setPeers([]); setMenu(true); setError(t("Доступ к доске отозван.")); return; }
           current.current = entry; setSelected(entry);
           if (manager.current) await manager.current.setRole(entry.role);
           await watch(entry);
@@ -186,7 +192,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
         identity.current = await identityFor(ws, account);
         if (!alive.current) return;
         const all = await list();
-        if (!identity.current.initialized && !all.some(entry => entry.ownerId === account.accountId)) await create('Моя доска', initialBoard);
+        if (!identity.current.initialized && !all.some(entry => entry.ownerId === account.accountId)) await create(t("Моя доска"), initialBoard);
         else if (all.length) {
           let saved: string | null = null; try { saved = sessionStorage.getItem(`notes:active-board:${account.accountId}`); } catch { /* optional preference */ }
           await select(all.find(entry => entry.id === saved) ?? all.find(entry => entry.ownerId === account.accountId) ?? all[0]);
@@ -194,25 +200,29 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
       } catch (err) { if (alive.current) setError(authError(err)); }
       finally { if (alive.current) setBusy(false); }
     })();
-    function unload(event: BeforeUnloadEvent) { if (manager.current?.dirty || renames.current.size) { event.preventDefault(); event.returnValue = ''; } }
+    function unload(event: BeforeUnloadEvent) { flushCameras(); if (manager.current?.dirty || renames.current.size) { event.preventDefault(); event.returnValue = ''; } }
     window.addEventListener('beforeunload', unload);
     const stale = setInterval(() => { let changed = false; for (const [id, drag] of remoteDrags.current) if (Date.now() - drag.at > 2000) { remoteDrags.current.delete(id); changed = true; } if (changed) renderDrags(); }, 1000);
-    return () => { alive.current = false; generation.current++; cancelAnimationFrame(dragAnimation.current); clearTimeout(renameTimer.current); manager.current?.dispose(); for (const fn of off) fn(); ws.close(); clearInterval(stale); window.removeEventListener('beforeunload', unload); };
+    return () => { flushCameras(); alive.current = false; generation.current++; cancelAnimationFrame(dragAnimation.current); clearTimeout(renameTimer.current); manager.current?.dispose(); for (const fn of off) fn(); ws.close(); clearInterval(stale); window.removeEventListener('beforeunload', unload); };
   }, [account.accountId]);
   async function action(fn: () => Promise<void>) {
     if (working.current) return;
     working.current = true; setBusy(true); setError('');
     try { await fn(); } catch (err) { reportError(authError(err)); } finally { working.current = false; setBusy(false); }
   }
-  function change(next: BoardData) { manager.current?.update(next); setBoard(manager.current?.board ?? next); }
+  function change(next: BoardData) {
+    const active = current.current, previous = manager.current?.board.camera;
+    if (active && (previous?.x !== next.camera.x || previous?.y !== next.camera.y || previous?.zoom !== next.camera.zoom)) rememberCamera(account.accountId, active.id, next.camera);
+    manager.current?.update(next); setBoard(manager.current?.board ?? next);
+  }
   async function toggleLock(id: string) {
     if (current.current?.role !== 'owner' || noteBusy) return;
     const sync = manager.current!;
     setNoteBusy(id); setError('');
     try {
-      if (!(await sync.flush())) throw new Error('Сначала сохраните изменения.');
+      if (!(await sync.flush())) throw new Error(t("Сначала сохраните изменения."));
       const note = sync.board.notes.find(item => item.id === id); if (!note) return;
-      if (!sync.board.lockKeys) throw new Error('Ключи блокировки отсутствуют. Войдите заново.');
+      if (!sync.board.lockKeys) throw new Error(t("Ключи блокировки отсутствуют. Войдите заново."));
       if (note.sealed && account.authMethod === 'key') { setUnlocking(note); return; }
       const result = note.sealed ? await unlockNote(note, sync.board.lockKeys, account.accountId) : await sealNote(note, sync.board.lockKeys, account.accountId);
       if (manager.current !== sync) return;
@@ -222,7 +232,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     } catch (err) { setError(authError(err)); }
     finally { setNoteBusy(null); }
   }
-  async function copy(value: string) { await navigator.clipboard.writeText(value); }
+  async function copy(value: string) { try { await navigator.clipboard.writeText(value); } catch { throw new Error(t("Не удалось скопировать в буфер обмена.")); } }
   async function share() {
     if (!selected || selected.role !== 'owner') return;
     setName(selected.title); setMembers(await socket.current!.request('boards.members', { boardId: selected.id })); setSharing(true);
@@ -236,7 +246,7 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
     setInviteUid(''); setMembers(await socket.current!.request('boards.members', { boardId: selected.id }));
   }
   async function publish() {
-    if (!selected || !(await manager.current!.flush())) throw new Error('Сначала сохраните изменения.');
+    if (!selected || !(await manager.current!.flush())) throw new Error(t("Сначала сохраните изменения."));
     const result = await socket.current!.request<{ token: string | null }>('boards.public', { boardId: selected.id, snapshot: selected.publicToken ? null : publicSnapshot(selected.title, manager.current!.board) });
     const next = { ...selected, publicToken: result.token }; current.current = next; setSelected(next); await list();
   }
@@ -258,10 +268,10 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
   }
   async function restore(file?: File) {
     if (!file || !selected || selected.role !== 'owner') return;
-    if (file.size > 130_000_000) throw new Error('Слишком большой файл.');
-    const data = JSON.parse(await file.text()); if (data.accountId !== selected.id) throw new Error('Копия относится к другой доске.');
+    if (file.size > MAX_TRANSFER_BYTES) throw new Error(t("Слишком большой файл."));
+    const data = JSON.parse(await file.text()); if (data.accountId !== selected.id) throw new Error(t("Копия относится к другой доске."));
     const restored = await decryptBoard(selected.key, selected.id, data.revision, data.envelope);
-    if (confirm('Заменить содержимое доски этой копией?')) change(restored);
+    if (confirm(t("Заменить содержимое доски этой копией?"))) change(restored);
   }
   function cursor(point: { x: number; y: number } | null) {
     const active = current.current;
@@ -355,52 +365,52 @@ export function Workspace({ account, initialBoard, migrated, logout }: { account
   }
   const publicUrl = selected?.publicToken ? `${location.origin}/#public=${selected.publicToken}` : '';
   return <>
-    {selected && people > 1 && <div className="board-presence-count" title="Участников на доске" aria-label={`На доске ${people} участников`}><Icon name="user" size={16} /><span>{people}</span></div>}
+    {selected && people > 1 && <div className="board-presence-count" title={t("Участников на доске")} aria-label={countLabel('people', people)}><Icon name="user" size={16} /><span>{people}</span></div>}
     {selected ? <Board key={selected.id} board={board} onChange={change} onStorageLimit={() => setLimitReached(true)} role={selected.role} peers={peers} onCursor={cursor} onSelection={selection} onDrag={dragging} dragPreviews={dragPreviews} noteBusy={noteBusy} onToggleLock={toggleLock} clipboardKey={selected.key} accountId={selected.id} interactionBlocked={menu || sharing || profile || busy || Boolean(unlocking) || Boolean(deleting) || limitReached} actions={<>
-      <Button className="board-picker" icon="boards" onClick={() => void action(async () => { await list(); setMenu(true); })} label="Выбрать доску"><span className="board-picker-label">{selected.title}</span></Button>
+      <Button className="board-picker" icon="boards" onClick={() => void action(async () => { await list(); setMenu(true); })} label={t("Выбрать доску")}><span className="board-picker-label">{selected.title}</span></Button>
       <Button icon="user" label={`UID: ${account.accountId}`} onClick={() => { setCopiedUid(false); setProfile(true); }} />
-      {selected.role === 'owner' && <Button icon="share" label="Доступ к доске" onClick={() => void action(share)} />}
-      <Button icon="download" label="Скачать зашифрованную копию" onClick={() => void action(download)} />
-      {selected.role === 'owner' && <Button icon="upload" label="Открыть зашифрованную копию" onClick={() => input.current?.click()} />}
-      <Button icon="logout" label="Выйти" onClick={() => void action(async () => { if (!(await manager.current!.flush())) throw new Error('Сначала сохраните изменения.'); await logout(); })} />
-    </>} /> : <div className="login-screen"><Button onClick={() => void action(async () => { await list(); setMenu(true); })} disabled={busy}>{busy ? <span className="spinner" /> : 'Открыть список досок'}</Button></div>}
-    {error && <div className="workspace-error floating" role="alert">{error}<Button icon="retry" label="Повторить" onClick={() => void action(async () => { await flushNames(); if (manager.current) await manager.current.flush(); else { const all = await list(); if (all[0]) await select(all[0]); } })} /><Button icon="close" label="Закрыть" onClick={() => setError('')} /></div>}
+      {selected.role === 'owner' && <Button icon="share" label={t("Доступ к доске")} onClick={() => void action(share)} />}
+      <Button icon="download" label={t("Скачать зашифрованную копию")} onClick={() => void action(download)} />
+      {selected.role === 'owner' && <Button icon="upload" label={t("Открыть зашифрованную копию")} onClick={() => input.current?.click()} />}
+      <Button icon="logout" label={t("Выйти")} onClick={() => void action(async () => { if (!(await manager.current!.flush())) throw new Error(t("Сначала сохраните изменения.")); await logout(); })} />
+    </>} /> : <div className="login-screen"><Button onClick={() => void action(async () => { await list(); setMenu(true); })} disabled={busy}>{busy ? <span className="spinner" /> : t("Открыть список досок")}</Button></div>}
+    {error && <div className="workspace-error floating" role="alert">{error}<Button icon="retry" label={t("Повторить")} onClick={() => void action(async () => { await flushNames(); if (manager.current) await manager.current.flush(); else { const all = await list(); if (all[0]) await select(all[0]); } })} /><Button icon="close" label={t("Закрыть")} onClick={() => setError('')} /></div>}
     <input hidden ref={input} type="file" accept="application/json,.json" onChange={e => { const file = e.currentTarget.files?.[0]; e.currentTarget.value = ''; void action(() => restore(file)); }} />
-    <Modal open={limitReached} close={() => setLimitReached(false)} label="Лимит доски достигнут"><p>{BOARD_LIMIT_MESSAGE}</p><p>Последние изменения пока не сохранены. Освободите место, чтобы продолжить сохранение.</p></Modal>
-    <Modal open={menu} close={() => setMenu(false)} className="workspace-dialog" label="Доски">
+    <Modal open={limitReached} close={() => setLimitReached(false)} label={t("Лимит доски достигнут")}><p>{quotaMessage(selected?.limitBytes ?? BOARD_STORAGE_LIMIT)}</p><p>{t("Последние изменения пока не сохранены. Освободите место, чтобы продолжить сохранение.")}</p></Modal>
+    <Modal open={menu} close={() => setMenu(false)} className="workspace-dialog" label={t("Доски")}>
       {error && <p className="key-error" role="alert">{error}</p>}
-      <div className="board-section-heading"><h3>Мои доски <span>{own.length}/3</span></h3><Button icon="plus" label="Создать доску" disabled={busy || own.length >= 3} onClick={() => void action(() => create(`Доска ${own.length + 1}`))} /></div>
+      <div className="board-section-heading"><h3>{t("Мои доски")} <span>{own.length}/3</span></h3><Button icon="plus" label={t("Создать доску")} disabled={busy || own.length >= 3} onClick={() => void action(() => create(t('Доска {count}', { count: own.length + 1 })))} /></div>
       <div className="board-list" role="list">{own.map(entry => <div role="listitem" className="owned-board-row" key={entry.id}><Button className={`board-list-item ${entry.id === selected?.id ? 'current-board' : ''}`} disabled={busy} onClick={() => void action(() => select(entry))} aria-current={entry.id === selected?.id ? 'true' : undefined}>
-        <span className="board-miniature"><Icon name="boards" size={22} /></span><span className="board-entry-copy"><span className="board-list-name">{entry.title}</span><span className="board-entry-detail">{entry.publicToken ? 'Есть публичный снимок' : 'Личная доска'} · {((entry.usedBytes ?? 0) / 1e6).toFixed(1)} / 300 МБ</span></span><span className="board-entry-status"><Icon name={entry.id === selected?.id ? 'check' : 'next'} size={16} /></span>{usageBar(entry)}
-      </Button><Button icon="trash" className="board-delete-action" label={`Удалить доску «${entry.title}»`} disabled={busy} onClick={() => { setError(''); setDeleting(entry); }} /></div>)}</div>
-      {invited.length > 0 && <><div className="board-section-heading"><h3>Приглашённые <span>{invited.length}</span></h3></div><div className="board-list" role="list">{invited.map(entry => <div role="listitem" key={entry.id}><Button className={`board-list-item ${entry.id === selected?.id ? 'current-board' : ''}`} disabled={busy} onClick={() => void action(() => select(entry))} aria-current={entry.id === selected?.id ? 'true' : undefined}>
-        <span className="board-miniature shared"><Icon name="share" size={22} /></span><span className="board-entry-copy"><span className="board-list-name">{entry.title}</span><span className="board-entry-detail">{entry.role === 'editor' ? 'Редактор' : 'Только просмотр'} · {((entry.usedBytes ?? 0) / 1e6).toFixed(1)} / 300 МБ</span></span><span className="board-entry-status"><Icon name={entry.id === selected?.id ? 'check' : 'next'} size={16} /></span>{usageBar(entry)}
+        <span className="board-miniature"><Icon name="boards" size={22} /></span><span className="board-entry-copy"><span className="board-list-name">{entry.title}</span><span className="board-entry-detail">{entry.publicToken ? t("Есть публичный снимок") : t("Личная доска")} · {storageUsage(entry.usedBytes ?? 0, entry.limitBytes ?? BOARD_STORAGE_LIMIT)}</span></span><span className="board-entry-status"><Icon name={entry.id === selected?.id ? 'check' : 'next'} size={16} /></span>{usageBar(entry)}
+      </Button><Button icon="trash" className="board-delete-action" label={t('Удалить доску «{title}»', { title: entry.title })} disabled={busy} onClick={() => { setError(''); setDeleting(entry); }} /></div>)}</div>
+      {invited.length > 0 && <><div className="board-section-heading"><h3>{t("Приглашённые")} <span>{invited.length}</span></h3></div><div className="board-list" role="list">{invited.map(entry => <div role="listitem" key={entry.id}><Button className={`board-list-item ${entry.id === selected?.id ? 'current-board' : ''}`} disabled={busy} onClick={() => void action(() => select(entry))} aria-current={entry.id === selected?.id ? 'true' : undefined}>
+        <span className="board-miniature shared"><Icon name="share" size={22} /></span><span className="board-entry-copy"><span className="board-list-name">{entry.title}</span><span className="board-entry-detail">{entry.role === 'editor' ? t("Редактор") : t("Только просмотр")} · {storageUsage(entry.usedBytes ?? 0, entry.limitBytes ?? BOARD_STORAGE_LIMIT)}</span></span><span className="board-entry-status"><Icon name={entry.id === selected?.id ? 'check' : 'next'} size={16} /></span>{usageBar(entry)}
       </Button></div>)}</div></>}
     </Modal>
-    <Modal open={Boolean(deleting)} close={() => { if (!busy) setDeleting(null); }} label="Удалить доску?" className="workspace-dialog">
-      <p>Доска «{deleting?.title}», её заметки, изображения и публичный снимок будут удалены. Участники потеряют доступ. Это действие нельзя отменить.</p>
+    <Modal open={Boolean(deleting)} close={() => { if (!busy) setDeleting(null); }} label={t("Удалить доску?")} className="workspace-dialog">
+      <p>{t('Доска «{title}», её заметки, изображения и публичный снимок будут удалены. Участники потеряют доступ. Это действие нельзя отменить.', { title: deleting?.title ?? '' })}</p>
       {error && <p className="key-error" role="alert">{error}</p>}
-      <Button className="danger-button" disabled={busy || !deleting} onClick={() => { const entry = deleting; if (entry) void action(() => deleteBoard(entry)); }}>{busy ? 'Удаление…' : 'Удалить доску'}</Button>
+      <Button className="danger-button" disabled={busy || !deleting} onClick={() => { const entry = deleting; if (entry) void action(() => deleteBoard(entry)); }}>{busy ? t("Удаление…") : t("Удалить доску")}</Button>
     </Modal>
-    <Modal open={profile} close={() => setProfile(false)} className="workspace-dialog" label="Ваш UID">
-      <input aria-label="Ваш UID" readOnly value={account.accountId} onFocus={e => e.currentTarget.select()} />
-      <Button onClick={() => void action(async () => { await copy(account.accountId); setCopiedUid(true); })}>{copiedUid ? 'Скопировано' : 'Скопировать UID'}</Button>
+    <Modal open={profile} close={() => setProfile(false)} className="workspace-dialog" label={t("Ваш UID")}>
+      <input aria-label={t("Ваш UID")} readOnly value={account.accountId} onFocus={e => e.currentTarget.select()} />
+      <Button onClick={() => void action(async () => { await copy(account.accountId); setCopiedUid(true); })}>{copiedUid ? t("Скопировано") : t("Скопировать UID")}</Button>
       {error && <p className="key-error" role="alert">{error}</p>}
     </Modal>
-    <Modal open={sharing} close={() => void closeShare()} className="workspace-dialog" label="Доступ к доске">
+    <Modal open={sharing} close={() => void closeShare()} className="workspace-dialog" label={t("Доступ к доске")}>
       {error && <p className="key-error" role="alert">{error}</p>}
-      <label>Название<input className="access-key-input" value={name} maxLength={120} onInput={e => editName(e.currentTarget.value)} /></label>
-      <label>UID участника<input className="access-key-input" value={inviteUid} onInput={e => setInviteUid(e.currentTarget.value)} autoComplete="off" /></label>
+      <label>{t("Название")}<input className="access-key-input" value={name} maxLength={120} onInput={e => editName(e.currentTarget.value)} /></label>
+      <label>{t("UID участника")}<input className="access-key-input" value={inviteUid} onInput={e => setInviteUid(e.currentTarget.value)} autoComplete="off" /></label>
       <RoleDropdown value={inviteRole} change={setInviteRole} disabled={busy} />
-      <Button disabled={busy || !inviteUid.trim() || (members.length >= 10 && !members.some(member => member.uid === inviteUid.trim()))} onClick={() => void action(invite)}>Добавить участника</Button>
-      <div className="member-list"><h3>Участники · {members.length}/10</h3>
+      <Button disabled={busy || !inviteUid.trim() || (members.length >= 10 && !members.some(member => member.uid === inviteUid.trim()))} onClick={() => void action(invite)}>{t("Добавить участника")}</Button>
+      <div className="member-list"><h3>{t('Участники')} · {members.length}/10</h3>
       {members.map(member => <div className="member-row" key={member.uid}>
         <span className="member-avatar" style={{ color: participantColor(member.uid, member.color) }}><Icon name="user" size={18} /></span>
-        <span className="member-identity" title={member.uid}><span>{member.uid === account.accountId ? 'Вы' : `${member.uid.slice(0, 8)}…${member.uid.slice(-4)}`}</span><small>{member.uid === account.accountId ? 'Владелец' : 'Приглашённый участник'}</small></span>
-        {member.uid !== account.accountId && <><RoleDropdown compact value={member.role as 'editor' | 'viewer'} change={role => void action(() => invite(member.uid, role))} disabled={busy} /><Button icon="trash" label="Убрать доступ" disabled={busy} onClick={() => void action(async () => { await socket.current!.request('boards.removeMember', { boardId: selected!.id, uid: member.uid }); setMembers(await socket.current!.request('boards.members', { boardId: selected!.id })); })} /></>}
+        <span className="member-identity" title={member.uid}><span>{member.uid === account.accountId ? t("Вы") : `${member.uid.slice(0, 8)}…${member.uid.slice(-4)}`}</span><small>{member.uid === account.accountId ? t("Владелец") : t("Приглашённый участник")}</small></span>
+        {member.uid !== account.accountId && <><RoleDropdown compact value={member.role as 'editor' | 'viewer'} change={role => void action(() => invite(member.uid, role))} disabled={busy} /><Button icon="trash" label={t("Убрать доступ")} disabled={busy} onClick={() => void action(async () => { await socket.current!.request('boards.removeMember', { boardId: selected!.id, uid: member.uid }); setMembers(await socket.current!.request('boards.members', { boardId: selected!.id })); })} /></>}
       </div>)}</div>
-      <Button disabled={busy} onClick={() => void action(publish)}>{publicUrl ? 'Отключить публичный доступ' : 'Опубликовать снимок доски'}</Button>
-      {publicUrl && <><input className="access-key-input" aria-label="Публичная ссылка" readOnly value={publicUrl} /><Button onClick={() => void action(() => copy(publicUrl))}>Скопировать ссылку</Button><p>Опубликован снимок. Новые изменения останутся приватными.</p></>}
+      <Button disabled={busy} onClick={() => void action(publish)}>{publicUrl ? t("Отключить публичный доступ") : t("Опубликовать снимок доски")}</Button>
+      {publicUrl && <><input className="access-key-input" aria-label={t("Публичная ссылка")} readOnly value={publicUrl} /><Button onClick={() => void action(() => copy(publicUrl))}>{t("Скопировать ссылку")}</Button><p>{t("Опубликован снимок. Новые изменения останутся приватными.")}</p></>}
     </Modal>
     {unlocking && <KeyDialog unlock submit={async value => {
       const sync = manager.current!; const result = await unlockWithKey(value, account.accountId, unlocking, sync.board.lockKeys!);

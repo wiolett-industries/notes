@@ -1,7 +1,8 @@
+import { t } from './locale';
 import { useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { Button, Icon } from './ui';
 
-const choices = [{ value: 'viewer', label: 'Viewer — только просмотр' }, { value: 'editor', label: 'Редактор' }] as const;
+const choices = [{ value: 'viewer', label: t("Viewer — только просмотр") }, { value: 'editor', label: t("Редактор") }] as const;
 export function RoleDropdown({ value, change, disabled, compact = false }: { value: 'viewer' | 'editor'; change: (value: 'viewer' | 'editor') => void; disabled?: boolean; compact?: boolean }) {
   const id = useId();
   const [open, setOpen] = useState(false), [active, setActive] = useState(value === 'viewer' ? 0 : 1);
@@ -28,7 +29,7 @@ export function RoleDropdown({ value, change, disabled, compact = false }: { val
   }, [open, compact]);
   function choose(index: number) { change(choices[index].value); setActive(index); setOpen(false); wrapper.current?.querySelector('button')?.focus(); }
   return <div ref={wrapper} className="role-dropdown" onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOpen(false); }}>
-    <Button className="role-dropdown-trigger" label="Роль участника" disabled={disabled} aria-haspopup="listbox" aria-expanded={open} aria-controls={`${id}-options`}
+    <Button className="role-dropdown-trigger" label={t("Роль участника")} disabled={disabled} aria-haspopup="listbox" aria-expanded={open} aria-controls={`${id}-options`}
       onClick={() => { setActive(value === 'viewer' ? 0 : 1); setOpen(!open); }}
       onKeyDown={e => {
         if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setOpen(false); }
@@ -36,10 +37,10 @@ export function RoleDropdown({ value, change, disabled, compact = false }: { val
         if (open && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); choose(active); }
         if (open && (e.key === 'Home' || e.key === 'End')) { e.preventDefault(); setActive(e.key === 'Home' ? 0 : choices.length - 1); }
       }} aria-activedescendant={open ? `${id}-${choices[active].value}` : undefined}>
-      {compact ? value === 'viewer' ? 'Viewer' : 'Редактор' : choices.find(item => item.value === value)!.label}<span className={`dropdown-chevron ${open ? 'open' : ''}`}><Icon name="next" size={16} /></span>
+      {compact ? value === 'viewer' ? t('Просмотр') : t("Редактор") : choices.find(item => item.value === value)!.label}<span className={`dropdown-chevron ${open ? 'open' : ''}`}><Icon name="next" size={16} /></span>
     </Button>
-    {open && <div ref={popup} className="role-dropdown-options" id={`${id}-options`} role="listbox" aria-label="Роль участника">
-      {choices.map((choice, index) => <Button key={choice.value} id={`${id}-${choice.value}`} role="option" aria-selected={choice.value === value} className={active === index ? 'dropdown-active' : ''} onPointerDown={e => e.preventDefault()} onMouseEnter={() => setActive(index)} onClick={() => choose(index)}><span className="role-option-label">{compact ? choice.value === 'viewer' ? 'Viewer' : 'Редактор' : choice.label}</span><span className="role-option-check">{choice.value === value && <Icon name="check" size={16} />}</span></Button>)}
+    {open && <div ref={popup} className="role-dropdown-options" id={`${id}-options`} role="listbox" aria-label={t("Роль участника")}>
+      {choices.map((choice, index) => <Button key={choice.value} id={`${id}-${choice.value}`} role="option" aria-selected={choice.value === value} className={active === index ? 'dropdown-active' : ''} onPointerDown={e => e.preventDefault()} onMouseEnter={() => setActive(index)} onClick={() => choose(index)}><span className="role-option-label">{compact ? choice.value === 'viewer' ? t('Просмотр') : t("Редактор") : choice.label}</span><span className="role-option-check">{choice.value === value && <Icon name="check" size={16} />}</span></Button>)}
     </div>}
   </div>;
 }

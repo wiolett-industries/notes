@@ -1,5 +1,6 @@
+import { t, quotaMessage } from './locale';
 import { z } from 'zod';
-import { boardSchema, emptyBoard, envelopeSchema, MAX_BOARD_BYTES, MAX_ENCRYPTED_BYTES, type BoardData } from '@quiet/shared';
+import { boardSchema, emptyBoard, envelopeSchema, MAX_BOARD_BYTES, MAX_TRANSFER_BYTES, type BoardData } from '@quiet/shared';
 import { encryptBoard, decryptBoard } from './crypto';
 import { clamp, snap } from './geometry';
 import { remapMentions, mentionIds } from './markdown';
@@ -24,14 +25,14 @@ export function writeSelection(key: CryptoKey, accountId: string, board: BoardDa
   return content.then(text => navigator.clipboard.writeText(text));
 }
 export async function readSelection(key: CryptoKey, accountId: string, text: string) {
-  if (!text.startsWith(CLIPBOARD_PREFIX) || text.length > MAX_ENCRYPTED_BYTES + 100_000) throw new Error('Некорректные данные в буфере обмена.');
+  if (!text.startsWith(CLIPBOARD_PREFIX) || text.length > MAX_TRANSFER_BYTES) throw new Error(t("Некорректные данные в буфере обмена."));
   const packet = packetSchema.parse(JSON.parse(text.slice(CLIPBOARD_PREFIX.length)));
-  if (packet.accountId !== accountId) throw new Error('Заметки скопированы из другой доски.');
+  if (packet.accountId !== accountId) throw new Error(t("Заметки скопированы из другой доски."));
   return decryptBoard(key, accountId, 1, packet.envelope);
 }
 export function pasteSelection(board: BoardData, source: BoardData, offset: { x: number; y: number }) {
   if (!source.notes.length) return { board, ids: [] };
-  if (source.notes.some(note => note.sealed) && source.lockKeys?.publicKey !== board.lockKeys?.publicKey) throw new Error('Ключи заблокированных заметок не совпадают с ключами доски.');
+  if (source.notes.some(note => note.sealed) && source.lockKeys?.publicKey !== board.lockKeys?.publicKey) throw new Error(t("Ключи заблокированных заметок не совпадают с ключами доски."));
   const ids = new Map([...source.notes, ...source.groups].map(item => [item.id, crypto.randomUUID()]));
   const notes = source.notes.map(note => ({ ...note, id: ids.get(note.id)!,
     ...(!note.sealed ? { text: remapMentions(note.text, ids), mentions: mentionIds(remapMentions(note.text, ids)) } : {}),
@@ -40,8 +41,8 @@ export function pasteSelection(board: BoardData, source: BoardData, offset: { x:
   }));
   const groups = source.groups.map(group => ({ ...group, id: ids.get(group.id)!, noteIds: group.noteIds.map(id => ids.get(id)!) }));
   const connections = source.connections.map(edge => ({ ...edge, id: crypto.randomUUID(), source: ids.get(edge.source)!, target: ids.get(edge.target)! }));
-  if (board.notes.length + notes.length > 10000 || board.groups.length + groups.length > 5000 || board.connections.length + connections.length > 40000) throw new Error('Недостаточно места на доске для вставки.');
+  if (board.notes.length + notes.length > 10000 || board.groups.length + groups.length > 5000 || board.connections.length + connections.length > 40000) throw new Error(t("Недостаточно места на доске для вставки."));
   const next = boardSchema.parse({ ...board, notes: [...board.notes, ...notes], groups: [...board.groups, ...groups], connections: [...board.connections, ...connections] });
-  if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error('Вставка превысит размер доски (300 МБ).');
+  if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_BOARD_BYTES) throw new Error(quotaMessage(MAX_BOARD_BYTES));
   return { board: next, ids: notes.map(note => note.id) };
 }

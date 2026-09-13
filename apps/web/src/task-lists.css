@@ -1,0 +1,21 @@
+.markdown-body .task-list-item { list-style: none; }
+.markdown-body .task-checkbox {
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  width: 1em;
+  height: 1em;
+  border: 1px solid color-mix(in srgb, var(--paper-ink) 65%, transparent);
+  border-radius: 3px;
+  background: transparent;
+  margin: 0 .35em 0 -1.35em;
+  vertical-align: -.1em;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.markdown-body .task-checkbox::after { content: ''; width: .75em; height: .75em; background: var(--paper); opacity: 0; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='m20 6-11 11-5-5' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat; }
+.markdown-body .task-checkbox:checked { background: var(--paper-ink); border-color: var(--paper-ink); }
+.markdown-body .task-checkbox:checked::after { opacity: 1; }
+.markdown-body .task-checkbox:enabled:hover { border-color: var(--paper-ink); box-shadow: 0 0 0 2px color-mix(in srgb, var(--paper-ink) 12%, transparent); }
+.markdown-body .task-checkbox:disabled { cursor: default; opacity: .75; }
+.markdown-body .task-checkbox:focus-visible { outline: 2px solid var(--paper-ink); outline-offset: 2px; }

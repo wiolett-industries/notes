@@ -1,5 +1,5 @@
+import { MAX_TRANSFER_BYTES } from './limits.ts';
 export const CHUNK_CHARS = 64 * 1024;
-export const MAX_TRANSFER_BYTES = 440_000_000;
 const encoder = new TextEncoder();
 export function* encodeFrames(value: unknown): Generator<string> {
   const json = JSON.stringify(value);

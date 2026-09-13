@@ -4,7 +4,8 @@ import { dirname } from 'node:path';
 import { imageFiles } from './image-files.js';
 import { createCollaborationStore } from './collaboration-store.js';
 import type { WebAuthnCredential } from '@simplewebauthn/server';
-import { MAX_ENCRYPTED_BYTES, MAX_ENTITIES, type Envelope, type DeltaWrite, type InitialEntities, type Vault, type EntityWrite } from '@quiet/shared';
+import { configureBoardLimit, MAX_ENCRYPTED_BYTES, MAX_ENTITIES, type Envelope, type DeltaWrite, type InitialEntities, type Vault, type EntityWrite } from '@quiet/shared';
+import { storageLimitBytes } from './storage-limit.js';
 
 export class StorageLimitError extends Error {}
 
@@ -18,6 +19,7 @@ export type Ceremony = {
 };
 
 export function openStore(path: string, imagesPath = process.env.IMAGES_PATH ?? `${path}.images`) {
+  configureBoardLimit(storageLimitBytes());
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(path);
   db.exec(`

@@ -1,10 +1,8 @@
 import { z } from 'zod';
+import { MAX_ENCRYPTED_BYTES } from './limits.ts';
+export * from './limits.ts';
 
-export const BOARD_STORAGE_LIMIT = 300_000_000;
-export const BOARD_LIMIT_MESSAGE = 'Достигнут лимит доски — 300 МБ. Удалите часть данных или отключите публичный снимок.';
-export const MAX_ENCRYPTED_BYTES = 410_000_000;
 export const SESSION_SECONDS = 12 * 60 * 60;
-export const MAX_BOARD_BYTES = 300_000_000;
 export const GRID_SIZE = 8;
 export const PRF_INPUT = 'quiet/board/passkey-prf/v1';
 export const colors = ['sand', 'sage', 'rose', 'lavender', 'sky'] as const;
@@ -12,7 +10,7 @@ export const coordinate = z.number().finite().min(-1e9).max(1e9);
 export const base64url = z.string().regex(/^[A-Za-z0-9_-]+$/);
 export const envelopeSchema = z.object({
   version: z.literal(1), iv: base64url.length(16),
-  ciphertext: base64url.min(22).max(MAX_ENCRYPTED_BYTES),
+  ciphertext: base64url.min(22).refine(value => value.length <= MAX_ENCRYPTED_BYTES, 'Encrypted payload exceeds the configured limit.'),
 }).strict();
 export const noteContentSchema = z.object({
   title: z.string().max(240), text: z.string().max(50_000),
@@ -95,7 +93,7 @@ export const initialEntitiesSchema = z.object({
 export const keyAuthSchema = z.object({ accountId: base64url.length(43), authToken: base64url.length(43) }).strict();
 export const keyRegistrationSchema = keyAuthSchema.extend({ snapshot: initialEntitiesSchema });
 export type BoardRole = 'owner' | 'editor' | 'viewer';
-export type BoardEntry = { id: string; ownerId: string; role: BoardRole; name: Envelope; wrappedKey: string; publicToken?: string | null; usedBytes?: number };
+export type BoardEntry = { id: string; ownerId: string; role: BoardRole; name: Envelope; wrappedKey: string; publicToken?: string | null; usedBytes?: number; limitBytes?: number };
 export type AccountIdentity = { publicKey: string; privateKey: Envelope; initialized?: boolean };
 export const publicSnapshotSchema = z.object({ name: z.string().min(1).max(120), board: boardSchema, lockedIds: z.array(z.string().uuid()).max(10_000) }).strict().refine(value => !value.board.lockKeys && value.board.notes.every(note => !note.sealed), 'Public snapshots must not contain private keys or sealed payloads');
 export type PublicSnapshot = z.infer<typeof publicSnapshotSchema>;
