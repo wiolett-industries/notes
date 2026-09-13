@@ -153,7 +153,8 @@ class TreeReceiver {
   private stack: Container[] = [];
   private root: any;
   private roots = 0;
-  constructor(private materialize = true) {}
+  private materialize: boolean;
+  constructor(materialize = true) { this.materialize = materialize; }
   get active() { return this.id !== undefined; }
   clear() { this.id = undefined; this.index = 0; this.started = 0; this.bytes = 0; this.nodes = 0; this.stack = []; this.root = undefined; this.roots = 0; }
   private addBytes(bytes: number) {
